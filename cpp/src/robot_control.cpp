@@ -231,15 +231,18 @@ bool DryRunBackend::get_bool(unsigned index) {
     const auto item = bools_.find(index);
     return item != bools_.end() && item->second;
 }
-void DryRunBackend::set_pointc_vector(const std::vector<QueuePoint>& points) {
+void DryRunBackend::set_pointc_vector(
+    const std::vector<QueuePoint>& points, std::size_t start_index) {
     ensure_connected();
     last_vector_ = points;
+    last_start_index_ = start_index;
 }
 RobotStatus DryRunBackend::read_status() {
     ensure_connected();
     return {connected_, false, false, true, false};
 }
 const std::vector<QueuePoint>& DryRunBackend::last_vector() const { return last_vector_; }
+std::size_t DryRunBackend::last_start_index() const { return last_start_index_; }
 
 EfortSdkBackend::EfortSdkBackend(const RobotControlConfig& config) : config_(config) {}
 void EfortSdkBackend::check(int result, const std::string& operation) {
@@ -285,13 +288,14 @@ bool EfortSdkBackend::get_bool(unsigned index) {
     check(RobotAPI::GetBoolVariable(index, value, device_id_), "GetBoolVariable");
     return value;
 }
-void EfortSdkBackend::set_pointc_vector(const std::vector<QueuePoint>& points) {
+void EfortSdkBackend::set_pointc_vector(
+    const std::vector<QueuePoint>& points, std::size_t start_index) {
     std::vector<RobotAPI::PointC> values;
     values.reserve(points.size());
     for (std::size_t index = 0; index < points.size(); ++index) {
         const QueuePoint& item = points[index];
         RobotAPI::PointC point{};
-        point.index = static_cast<int>(index % 50);
+        point.index = static_cast<int>(start_index + index);
         point.x = item.pose.x;
         point.y = item.pose.y;
         point.z = item.pose.z;
@@ -325,7 +329,8 @@ void EfortSdkBackend::set_int(unsigned, int) { connect(); }
 int EfortSdkBackend::get_int(unsigned) { connect(); return 0; }
 void EfortSdkBackend::set_bool(unsigned, bool) { connect(); }
 bool EfortSdkBackend::get_bool(unsigned) { connect(); return false; }
-void EfortSdkBackend::set_pointc_vector(const std::vector<QueuePoint>&) { connect(); }
+void EfortSdkBackend::set_pointc_vector(
+    const std::vector<QueuePoint>&, std::size_t) { connect(); }
 RobotStatus EfortSdkBackend::read_status() { connect(); return {}; }
 #endif
 
@@ -339,9 +344,12 @@ RplBatchSender::RplBatchSender(
     : config_(config), backend_(backend) {}
 
 void RplBatchSender::send_batch(
-    const std::vector<QueuePoint>& batch, std::size_t batch_index) {
-    backend_.set_pointc_vector(batch);
+    const std::vector<QueuePoint>& batch,
+    std::size_t batch_index,
+    std::size_t buffer_start) {
+    backend_.set_pointc_vector(batch, buffer_start);
     std::cout << "sent batch=" << batch_index << " size=" << batch.size()
+              << " buffer_start=" << buffer_start
               << " queue_range=" << batch.front().queue_index << '-'
               << batch.back().queue_index << '\n';
 }
@@ -360,25 +368,51 @@ void RplBatchSender::wait_for_request(unsigned bool_index) {
     throw std::runtime_error("timed out waiting for XPL buffer request");
 }
 
+void RplBatchSender::wait_for_completion() {
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::duration<double>(config_.execution_timeout_s);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const RobotStatus status = backend_.read_status();
+        if (status.alarm || status.emergency_stop) {
+            throw std::runtime_error("robot unsafe while waiting for queue completion");
+        }
+        if (backend_.get_bool(config_.rpl.batch_done_bool)) return;
+        sleep_seconds(config_.monitor_poll_s);
+    }
+    throw std::runtime_error("timed out waiting for XPL queue completion");
+}
+
 void RplBatchSender::send_queue(const std::vector<QueuePoint>& points) {
     if (points.empty()) throw std::invalid_argument("cannot send an empty queue");
+    if (config_.batch_size != 25) {
+        throw std::invalid_argument(
+            "batch_size must be 25 because XPL buffers are fixed at 0-24 and 25-49");
+    }
     TiePointQueue queue_builder(config_);
     const auto batches = queue_builder.batches(points);
     backend_.set_int(config_.rpl.total_points_int, static_cast<int>(points.size()));
-    send_batch(batches.front(), 0);
-    backend_.set_bool(config_.rpl.start_bool, true);
-    for (std::size_t index = 1; index < batches.size(); ++index) {
-        if (!config_.dry_run) {
-            const unsigned request = index % 2 == 1
-                ? config_.rpl.request_buffer_a_bool
-                : config_.rpl.request_buffer_b_bool;
-            wait_for_request(request);
-            send_batch(batches[index], index);
-            backend_.set_bool(request, false);
-        } else {
-            send_batch(batches[index], index);
-        }
+    backend_.set_bool(config_.rpl.batch_done_bool, false);
+    backend_.set_bool(config_.rpl.stop_bool, false);
+    backend_.set_bool(config_.rpl.request_buffer_a_bool, false);
+    backend_.set_bool(config_.rpl.request_buffer_b_bool, false);
+
+    send_batch(batches.front(), 0, 0);
+    if (batches.size() > 1) {
+        send_batch(batches[1], 1, config_.batch_size);
     }
+    backend_.set_bool(config_.rpl.start_bool, true);
+    for (std::size_t index = 2; index < batches.size(); ++index) {
+        const bool target_a = index % 2 == 0;
+        const unsigned request = target_a
+            ? config_.rpl.request_buffer_a_bool
+            : config_.rpl.request_buffer_b_bool;
+        if (!config_.dry_run) {
+            wait_for_request(request);
+        }
+        send_batch(batches[index], index, target_a ? 0 : config_.batch_size);
+        if (!config_.dry_run) backend_.set_bool(request, false);
+    }
+    if (!config_.dry_run) wait_for_completion();
 }
 void RplBatchSender::request_stop() {
     backend_.set_bool(config_.rpl.stop_bool, true);
@@ -512,6 +546,8 @@ RobotControlConfig load_config_json(const std::string& path) {
         json::number(root, "handshake_poll_s", config.handshake_poll_s);
     config.handshake_timeout_s =
         json::number(root, "handshake_timeout_s", config.handshake_timeout_s);
+    config.execution_timeout_s =
+        json::number(root, "execution_timeout_s", config.execution_timeout_s);
     config.monitor_poll_s =
         json::number(root, "monitor_poll_s", config.monitor_poll_s);
     if (const json::Value* workspace = root.find("workspace")) {

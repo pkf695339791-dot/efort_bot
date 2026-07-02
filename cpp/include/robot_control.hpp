@@ -33,7 +33,7 @@ struct RplVariableMap {
     unsigned request_buffer_b_bool{2};
     unsigned start_bool{3};
     unsigned stop_bool{4};
-    unsigned batch_done_bool{5};
+    unsigned batch_done_bool{0};
 };
 
 struct RobotControlConfig {
@@ -52,7 +52,8 @@ struct RobotControlConfig {
     double retreat_offset_z_mm{50.0};
     double tie_dwell_s{0.25};
     double handshake_poll_s{0.05};
-    double handshake_timeout_s{10.0};
+    double handshake_timeout_s{120.0};
+    double execution_timeout_s{300.0};
     double monitor_poll_s{0.1};
     WorkspaceLimits workspace{};
     RplVariableMap rpl{};
@@ -146,7 +147,8 @@ public:
     virtual int get_int(unsigned index) = 0;
     virtual void set_bool(unsigned index, bool value) = 0;
     virtual bool get_bool(unsigned index) = 0;
-    virtual void set_pointc_vector(const std::vector<QueuePoint>& points) = 0;
+    virtual void set_pointc_vector(
+        const std::vector<QueuePoint>& points, std::size_t start_index) = 0;
     virtual RobotStatus read_status() = 0;
 };
 
@@ -160,10 +162,12 @@ public:
     int get_int(unsigned index) override;
     void set_bool(unsigned index, bool value) override;
     bool get_bool(unsigned index) override;
-    void set_pointc_vector(const std::vector<QueuePoint>& points) override;
+    void set_pointc_vector(
+        const std::vector<QueuePoint>& points, std::size_t start_index) override;
     RobotStatus read_status() override;
 
     const std::vector<QueuePoint>& last_vector() const;
+    std::size_t last_start_index() const;
 
 private:
     const RobotControlConfig& config_;
@@ -171,6 +175,7 @@ private:
     std::unordered_map<unsigned, bool> bools_;
     std::unordered_map<unsigned, int> ints_;
     std::vector<QueuePoint> last_vector_;
+    std::size_t last_start_index_{};
     void ensure_connected() const;
 };
 
@@ -184,7 +189,8 @@ public:
     int get_int(unsigned index) override;
     void set_bool(unsigned index, bool value) override;
     bool get_bool(unsigned index) override;
-    void set_pointc_vector(const std::vector<QueuePoint>& points) override;
+    void set_pointc_vector(
+        const std::vector<QueuePoint>& points, std::size_t start_index) override;
     RobotStatus read_status() override;
 
 private:
@@ -204,8 +210,12 @@ public:
 private:
     const RobotControlConfig& config_;
     RobotBackend& backend_;
-    void send_batch(const std::vector<QueuePoint>& batch, std::size_t batch_index);
+    void send_batch(
+        const std::vector<QueuePoint>& batch,
+        std::size_t batch_index,
+        std::size_t buffer_start);
     void wait_for_request(unsigned bool_index);
+    void wait_for_completion();
 };
 
 class ExecutionMonitor {
@@ -246,4 +256,3 @@ RobotControlConfig load_config_json(const std::string& path);
 std::string queue_point_kind_name(QueuePointKind kind);
 
 }  // namespace tie
-

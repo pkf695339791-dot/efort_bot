@@ -13,6 +13,11 @@
 控制器端继续使用仓库根目录的 `TIE_QUEUE_SIM.XPL`。当前 XPL 仍以 `mlin`
 执行所有 `PointC`，尚未加入 `PointJ/mjoint` 混合运动。
 
+双缓冲固定为 `PC_POINTC[0..24]` 和 `PC_POINTC[25..49]`。程序在启动前
+预装两批点位；XPL 完成一整块缓冲区后才通过 `PC_BOOL[1]` 或
+`PC_BOOL[2]` 请求覆写，并通过 `PC_BOOL[0]` 报告整条队列完成。
+`PC_BOOL[4]` 用于请求停止，因此 `batch_size` 必须保持为 25。
+
 ## 构建 dry-run
 
 在安装了 CMake 和 Visual Studio C++ Build Tools 的终端中执行：
@@ -40,11 +45,13 @@ SDK 版本会链接仓库中的 `EftSdk.lib`，并在构建后复制 `EftSdk.dll
 
 ```powershell
 cpp\build-sdk\Release\run_tie_queue.exe `
+  --config samples\real_config.json `
   --points samples\tie_points.json `
   --real-robot
 ```
 
 首次实机运行前必须确认控制器 IP、工具名、工件坐标系、姿态、工作空间和低速倍率。
+`samples/real_config.json` 是由 C++ 直接读取的 JSON 配置，不依赖 Python。
 
 ## 与视觉 C++ 集成
 
@@ -58,4 +65,3 @@ controller.run(detected_points);
 
 坐标标定矩阵应接入 `CoordinateManager::to_workobject_pose()`。机械臂控制权应只由
 `RobotControlSystem` 持有，避免视觉线程与控制线程同时调用 SDK。
-

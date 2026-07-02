@@ -1,0 +1,34 @@
+{
+  "controller_ip": "192.168.1.12",
+  "tool_name": "tool_tie",
+  "workobject_name": "wobj_rebar",
+  "dry_run": false,
+  "require_servo_on": true,
+  "batch_size": 25,
+  "speed": 10,
+  "zone": -1.0,
+  "approach_offset_z_mm": 50.0,
+  "retreat_offset_z_mm": 50.0,
+  "handshake_poll_s": 0.05,
+  "handshake_timeout_s": 120.0,
+  "execution_timeout_s": 300.0,
+  "monitor_poll_s": 0.1,
+  "workspace": {
+    "x": [-1000.0, 1000.0],
+    "y": [-1000.0, 1000.0],
+    "z": [-500.0, 1500.0],
+    "a": [-180.0, 180.0],
+    "b": [-180.0, 180.0],
+    "c": [-180.0, 180.0]
+  },
+  "rpl": {
+    "total_points_int": 0,
+    "current_point_int": 1,
+    "error_code_int": 2,
+    "request_buffer_a_bool": 1,
+    "request_buffer_b_bool": 2,
+    "start_bool": 3,
+    "stop_bool": 4,
+    "batch_done_bool": 0
+  }
+}
