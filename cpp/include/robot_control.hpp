@@ -119,8 +119,10 @@ public:
     virtual int get_int(unsigned index) = 0;
     virtual void set_bool(unsigned index, bool value) = 0;
     virtual bool get_bool(unsigned index) = 0;
-    virtual void set_pointc_vector(
-        const std::vector<MotionSegment>& segments, std::size_t start_index) = 0;
+    virtual void set_motion_batch(
+        const std::vector<MotionSegment>& segments,
+        std::size_t target_start_index,
+        unsigned motion_type_start_index) = 0;
     virtual RobotStatus read_status() = 0;
 };
 
@@ -134,8 +136,10 @@ public:
     int get_int(unsigned index) override;
     void set_bool(unsigned index, bool value) override;
     bool get_bool(unsigned index) override;
-    void set_pointc_vector(
-        const std::vector<MotionSegment>& segments, std::size_t start_index) override;
+    void set_motion_batch(
+        const std::vector<MotionSegment>& segments,
+        std::size_t target_start_index,
+        unsigned motion_type_start_index) override;
     RobotStatus read_status() override;
 
     const std::vector<MotionSegment>& last_vector() const;
@@ -161,8 +165,10 @@ public:
     int get_int(unsigned index) override;
     void set_bool(unsigned index, bool value) override;
     bool get_bool(unsigned index) override;
-    void set_pointc_vector(
-        const std::vector<MotionSegment>& segments, std::size_t start_index) override;
+    void set_motion_batch(
+        const std::vector<MotionSegment>& segments,
+        std::size_t target_start_index,
+        unsigned motion_type_start_index) override;
     RobotStatus read_status() override;
 
 private:
@@ -188,6 +194,7 @@ private:
         std::size_t buffer_start);
     void wait_for_request(unsigned bool_index);
     void wait_for_completion();
+    void throw_if_controller_error();
 };
 
 class ExecutionMonitor {

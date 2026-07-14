@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -15,17 +16,32 @@ public:
     void connect() override { connected = true; }
     void disconnect() noexcept override { connected = false; }
     void prepare() override {}
-    void set_int(unsigned, int) override {}
-    int get_int(unsigned) override { return 0; }
+    void set_int(unsigned index, int value) override { ints[index] = value; }
+    int get_int(unsigned index) override {
+        if (force_controller_error && index == forced_error_code_index) {
+            return forced_error_code;
+        }
+        const auto item = ints.find(index);
+        return item == ints.end() ? 0 : item->second;
+    }
     void set_bool(unsigned index, bool value) override { bools[index] = value; }
     bool get_bool(unsigned index) override {
+        if (force_controller_error && index == forced_error_bool_index) return true;
         if (index == 0 || index == 1 || index == 2) return true;
         const auto item = bools.find(index);
         return item != bools.end() && item->second;
     }
-    void set_pointc_vector(
-        const std::vector<tie::MotionSegment>&, std::size_t start_index) override {
-        starts.push_back(start_index);
+    void set_motion_batch(
+        const std::vector<tie::MotionSegment>& segments,
+        std::size_t target_start_index,
+        unsigned motion_type_start_index) override {
+        target_starts.push_back(target_start_index);
+        type_starts.push_back(motion_type_start_index);
+        std::vector<int> batch_types;
+        for (const auto& segment : segments) {
+            batch_types.push_back(static_cast<int>(segment.motion_type));
+        }
+        type_batches.push_back(std::move(batch_types));
     }
     tie::RobotStatus read_status() override {
         return {connected, false, false, true, false};
@@ -33,7 +49,14 @@ public:
 
     bool connected{true};
     std::unordered_map<unsigned, bool> bools;
-    std::vector<std::size_t> starts;
+    std::unordered_map<unsigned, int> ints;
+    std::vector<std::size_t> target_starts;
+    std::vector<unsigned> type_starts;
+    std::vector<std::vector<int>> type_batches;
+    bool force_controller_error{};
+    unsigned forced_error_bool_index{5};
+    unsigned forced_error_code_index{3};
+    int forced_error_code{9001};
 };
 
 void require(bool condition, const std::string& message) {
@@ -134,11 +157,46 @@ void test_real_handshake_buffer_sequence() {
     config.dry_run = false;
     config.tie_dwell_s = 0.0;
     tie::MotionPlanBuilder builder(config);
-    const auto plan = builder.build(make_points(16));
+    const auto plan = builder.build(make_points(11));
     HandshakeBackend backend;
     tie::RplBatchSender(config, backend).send_queue(plan);
-    require(backend.starts == std::vector<std::size_t>({0, 25, 0, 25}),
+    require(backend.target_starts == std::vector<std::size_t>({0, 25, 0}),
             "real handshake must alternate A/B buffer offsets");
+    require(backend.type_starts == std::vector<unsigned>({10, 35, 10}),
+            "motion type buffers must use matching A/B offsets");
+    require(backend.type_batches.front().at(0) ==
+                static_cast<int>(tie::MotionType::MJoint),
+            "safe entry type code must be MJOINT");
+    require(backend.type_batches.front().at(1) ==
+                static_cast<int>(tie::MotionType::MLinear),
+            "approach type code must be MLIN");
+    require(backend.ints.at(config.rpl.transfer_velocity_profile_int) == 100,
+            "transfer velocity profile must be initialized");
+    require(backend.ints.at(config.rpl.local_velocity_profile_int) == 100,
+            "local velocity profile must be initialized");
+    require(backend.ints.at(config.rpl.error_code_int) == 0,
+            "controller error code must be cleared before start");
+}
+
+void test_controller_error_is_reported() {
+    tie::RobotControlConfig config;
+    config.dry_run = false;
+    config.handshake_poll_s = 0.0;
+    config.execution_timeout_s = 1.0;
+    tie::MotionPlanBuilder builder(config);
+    const auto plan = builder.build(make_points(1));
+    HandshakeBackend backend;
+    backend.force_controller_error = true;
+    backend.forced_error_bool_index = config.rpl.controller_error_bool;
+    backend.forced_error_code_index = config.rpl.error_code_int;
+    try {
+        tie::RplBatchSender(config, backend).send_queue(plan);
+    } catch (const std::runtime_error& error) {
+        require(std::string(error.what()).find("9001") != std::string::npos,
+                "controller error message must contain its code");
+        return;
+    }
+    throw std::runtime_error("controller error flag must fail queue execution");
 }
 
 void test_json_loading() {
@@ -170,6 +228,7 @@ int main() {
         test_dry_run_sender();
         test_double_buffer_wraps_to_a();
         test_real_handshake_buffer_sequence();
+        test_controller_error_is_reported();
         test_json_loading();
         std::cout << "All C++ robot control tests passed.\n";
         return 0;

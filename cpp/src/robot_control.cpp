@@ -233,11 +233,13 @@ bool DryRunBackend::get_bool(unsigned index) {
     const auto item = bools_.find(index);
     return item != bools_.end() && item->second;
 }
-void DryRunBackend::set_pointc_vector(
-    const std::vector<MotionSegment>& segments, std::size_t start_index) {
+void DryRunBackend::set_motion_batch(
+    const std::vector<MotionSegment>& segments,
+    std::size_t target_start_index,
+    unsigned) {
     ensure_connected();
     last_vector_ = segments;
-    last_start_index_ = start_index;
+    last_start_index_ = target_start_index;
 }
 RobotStatus DryRunBackend::read_status() {
     ensure_connected();
@@ -292,27 +294,60 @@ bool EfortSdkBackend::get_bool(unsigned index) {
     check(RobotAPI::GetBoolVariable(index, value, device_id_), "GetBoolVariable");
     return value;
 }
-void EfortSdkBackend::set_pointc_vector(
-    const std::vector<MotionSegment>& segments, std::size_t start_index) {
-    std::vector<RobotAPI::PointC> values;
-    values.reserve(segments.size());
+void EfortSdkBackend::set_motion_batch(
+    const std::vector<MotionSegment>& segments,
+    std::size_t target_start_index,
+    unsigned motion_type_start_index) {
+    std::vector<RobotAPI::PointC> point_c_values;
+    std::vector<RobotAPI::PointJ> point_j_values;
+    std::vector<int> motion_types;
+    point_c_values.reserve(segments.size());
+    point_j_values.reserve(segments.size());
+    motion_types.reserve(segments.size());
     for (std::size_t index = 0; index < segments.size(); ++index) {
         const MotionSegment& item = segments[index];
-        RobotAPI::PointC point{};
-        point.index = static_cast<int>(start_index + index);
-        point.x = item.target_pose.x;
-        point.y = item.target_pose.y;
-        point.z = item.target_pose.z;
-        point.a = item.target_pose.a;
-        point.b = item.target_pose.b;
-        point.c = item.target_pose.c;
-        point.cfgx = item.target_pose.cfgx;
-        point.cfg1 = item.target_pose.cfg1;
-        point.cfg4 = item.target_pose.cfg4;
-        point.cfg6 = item.target_pose.cfg6;
-        values.push_back(point);
+        const int slot = static_cast<int>(target_start_index + index);
+        RobotAPI::PointC point_c{};
+        point_c.index = slot;
+        point_c.x = item.target_pose.x;
+        point_c.y = item.target_pose.y;
+        point_c.z = item.target_pose.z;
+        point_c.a = item.target_pose.a;
+        point_c.b = item.target_pose.b;
+        point_c.c = item.target_pose.c;
+        point_c.cfgx = item.target_pose.cfgx;
+        point_c.cfg1 = item.target_pose.cfg1;
+        point_c.cfg4 = item.target_pose.cfg4;
+        point_c.cfg6 = item.target_pose.cfg6;
+        point_c_values.push_back(point_c);
+
+        RobotAPI::PointJ point_j{};
+        point_j.index = slot;
+        if (item.motion_type == MotionType::MJoint) {
+            if (!item.joint_target) {
+                throw std::runtime_error(
+                    "MJOINT segment is missing SDK-resolved joint target");
+            }
+            point_j.j1 = item.joint_target->joints[0];
+            point_j.j2 = item.joint_target->joints[1];
+            point_j.j3 = item.joint_target->joints[2];
+            point_j.j4 = item.joint_target->joints[3];
+            point_j.j5 = item.joint_target->joints[4];
+            point_j.j6 = item.joint_target->joints[5];
+        }
+        point_j_values.push_back(point_j);
+        motion_types.push_back(static_cast<int>(item.motion_type));
     }
-    check(RobotAPI::SetPointCVector(values, device_id_, false), "SetPointCVector");
+    check(RobotAPI::SetPointCVector(point_c_values, device_id_, false),
+          "SetPointCVector");
+    check(RobotAPI::SetPointJVector(point_j_values, device_id_, false),
+          "SetPointJVector");
+    check(RobotAPI::SetIntVariable(
+              motion_type_start_index,
+              static_cast<unsigned>(motion_types.size()),
+              motion_types.data(),
+              device_id_),
+          "SetIntVariable(motion types)");
 }
 RobotStatus EfortSdkBackend::read_status() {
     bool alarm{}, emergency{}, servo{}, moving{};
@@ -333,8 +368,8 @@ void EfortSdkBackend::set_int(unsigned, int) { connect(); }
 int EfortSdkBackend::get_int(unsigned) { connect(); return 0; }
 void EfortSdkBackend::set_bool(unsigned, bool) { connect(); }
 bool EfortSdkBackend::get_bool(unsigned) { connect(); return false; }
-void EfortSdkBackend::set_pointc_vector(
-    const std::vector<MotionSegment>&, std::size_t) { connect(); }
+void EfortSdkBackend::set_motion_batch(
+    const std::vector<MotionSegment>&, std::size_t, unsigned) { connect(); }
 RobotStatus EfortSdkBackend::read_status() { connect(); return {}; }
 #endif
 
@@ -351,7 +386,10 @@ void RplBatchSender::send_batch(
     const std::vector<MotionSegment>& batch,
     std::size_t batch_index,
     std::size_t buffer_start) {
-    backend_.set_pointc_vector(batch, buffer_start);
+    backend_.set_motion_batch(
+        batch,
+        buffer_start,
+        config_.rpl.motion_type_int_start + static_cast<unsigned>(buffer_start));
     std::cout << "sent batch=" << batch_index << " size=" << batch.size()
               << " buffer_start=" << buffer_start
               << " sequence_range=" << batch.front().sequence_index << '-'
@@ -362,6 +400,7 @@ void RplBatchSender::wait_for_request(unsigned bool_index) {
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::duration<double>(config_.handshake_timeout_s);
     while (std::chrono::steady_clock::now() < deadline) {
+        throw_if_controller_error();
         const RobotStatus status = backend_.read_status();
         if (status.alarm || status.emergency_stop) {
             throw std::runtime_error("robot unsafe while waiting for XPL buffer request");
@@ -376,6 +415,7 @@ void RplBatchSender::wait_for_completion() {
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::duration<double>(config_.execution_timeout_s);
     while (std::chrono::steady_clock::now() < deadline) {
+        throw_if_controller_error();
         const RobotStatus status = backend_.read_status();
         if (status.alarm || status.emergency_stop) {
             throw std::runtime_error("robot unsafe while waiting for queue completion");
@@ -384,6 +424,12 @@ void RplBatchSender::wait_for_completion() {
         sleep_seconds(config_.monitor_poll_s);
     }
     throw std::runtime_error("timed out waiting for XPL queue completion");
+}
+
+void RplBatchSender::throw_if_controller_error() {
+    if (!backend_.get_bool(config_.rpl.controller_error_bool)) return;
+    const int code = backend_.get_int(config_.rpl.error_code_int);
+    throw std::runtime_error("controller error code " + std::to_string(code));
 }
 
 void RplBatchSender::send_queue(const std::vector<MotionSegment>& segments) {
@@ -395,6 +441,14 @@ void RplBatchSender::send_queue(const std::vector<MotionSegment>& segments) {
     MotionPlanBuilder plan_builder(config_);
     const auto batches = plan_builder.batches(segments);
     backend_.set_int(config_.rpl.total_points_int, static_cast<int>(segments.size()));
+    backend_.set_int(
+        config_.rpl.transfer_velocity_profile_int,
+        config_.motion.transfer_velocity_profile);
+    backend_.set_int(
+        config_.rpl.local_velocity_profile_int,
+        config_.motion.local_velocity_profile);
+    backend_.set_int(config_.rpl.error_code_int, 0);
+    backend_.set_bool(config_.rpl.controller_error_bool, false);
     backend_.set_bool(config_.rpl.batch_done_bool, false);
     backend_.set_bool(config_.rpl.stop_bool, false);
     backend_.set_bool(config_.rpl.request_buffer_a_bool, false);
