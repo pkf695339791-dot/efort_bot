@@ -1,6 +1,7 @@
 #include "robot_control.hpp"
 
 #include <cmath>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -101,6 +102,38 @@ std::vector<tie::TiePoint> make_points(int count) {
         points.push_back({"P" + std::to_string(index), pose, 0.9, "test"});
     }
     return points;
+}
+
+std::string read_text_file(const std::string& path) {
+    std::ifstream input(path);
+    if (!input) throw std::runtime_error("cannot open template: " + path);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+void require_tokens(const std::string& text,
+                    const std::vector<std::string>& tokens,
+                    const std::string& template_name) {
+    for (const auto& token : tokens) {
+        require(text.find(token) != std::string::npos,
+                template_name + " is missing contract token: " + token);
+    }
+}
+
+void test_controller_templates_support_mixed_motion() {
+#ifdef TEST_PGM_PATH
+    require_tokens(read_text_file(TEST_PGM_PATH),
+                   {"PC_INT[10", "PC_POINTJ[", "MJOINT", "PC_POINTC[", "MLIN",
+                    "PC_BOOL[5]", "PC_INT[3]", "v100perc", "v100", "v800",
+                    "9001", "9002"},
+                   "PGM template");
+#endif
+#ifdef TEST_XPL_PATH
+    require_tokens(read_text_file(TEST_XPL_PATH),
+                   {"PC_INT[10", "PC_POINTJ[", "<mjoint>", "PC_POINTC[", "<mlin>",
+                    "PC_BOOL[5]", "PC_INT[3]", "v100perc", "v100", "v800",
+                    "9001", "9002"},
+                   "XPL template");
+#endif
 }
 
 void test_five_stage_plan() {
@@ -287,6 +320,7 @@ int main() {
         test_preflight_rejects_before_any_batch();
         test_preflight_resolves_mjoint_targets();
         test_json_loading();
+        test_controller_templates_support_mixed_motion();
         std::cout << "All C++ robot control tests passed.\n";
         return 0;
     } catch (const std::exception& error) {

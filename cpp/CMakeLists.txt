@@ -45,6 +45,8 @@ target_link_libraries(robot_control_tests PRIVATE robot_control)
 target_compile_definitions(robot_control_tests PRIVATE
     TEST_DATA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/tie_points.json"
     TEST_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/real_config.json"
+    TEST_PGM_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../TIE_QUEUE_SIM.pgm"
+    TEST_XPL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../TIE_QUEUE_SIM.XPL"
 )
 add_test(NAME robot_control_tests COMMAND robot_control_tests)
 

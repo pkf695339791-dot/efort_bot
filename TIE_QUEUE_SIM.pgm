@@ -1,0 +1,118 @@
+(* Mixed-motion double-buffer queue for ER25-2700. *)
+comutil.PC_BOOL[0] := false;  (* queue completed *)
+comutil.PC_BOOL[1] := false;  (* buffer A can be refilled *)
+comutil.PC_BOOL[2] := false;  (* buffer B can be refilled *)
+comutil.PC_BOOL[5] := false;  (* controller error *)
+comutil.PC_INT[3] := 0;       (* controller error code *)
+
+(* Wait until the PC has loaded the initial buffers. *)
+WHILE (comutil.PC_BOOL[3] = false) AND (running = true) DO
+    IF comutil.PC_BOOL[4] = true THEN
+        running := false;
+        EXIT;
+    END_IF;
+END_WHILE;
+
+(* Validate profiles only after the PC has published the initial batch. *)
+IF comutil.PC_INT[1] <> 100 THEN
+    comutil.PC_INT[3] := 9002;
+    comutil.PC_BOOL[5] := true;
+    running := false;
+END_IF;
+IF (comutil.PC_INT[2] <> 100) AND (comutil.PC_INT[2] <> 800) THEN
+    comutil.PC_INT[3] := 9002;
+    comutil.PC_BOOL[5] := true;
+    running := false;
+END_IF;
+
+totalPoints := comutil.PC_INT[0];
+
+WHILE running = true DO
+    IF currentPoint >= totalPoints THEN
+        EXIT;
+    END_IF;
+
+    WHILE comutil.PC_BOOL[1] = true DO
+        IF comutil.PC_BOOL[4] = true THEN
+            running := false;
+            EXIT;
+        END_IF;
+    END_WHILE;
+
+    (* Execute buffer A. Motion type is PC_INT[10+i]. *)
+    FOR i := 0 TO 24 DO
+        IF (running = false) OR (currentPoint >= totalPoints) THEN
+            EXIT;
+        END_IF;
+        IF comutil.PC_BOOL[4] = true THEN
+            running := false;
+            EXIT;
+        END_IF;
+
+        IF comutil.PC_INT[10+i] = 1 THEN
+            CALL: comutil.GetPC_POINTJ(i);
+            MJOINT(comutil.PC_POINTJ[i], v100perc, fine, tool1);
+        ELSIF comutil.PC_INT[10+i] = 0 THEN
+            CALL: comutil.GetPC_POINTC(i);
+            IF comutil.PC_INT[2] = 100 THEN
+                MLIN(comutil.PC_POINTC[i], v100, fine, tool1);
+            ELSE
+                MLIN(comutil.PC_POINTC[i], v800, fine, tool1);
+            END_IF;
+        ELSE
+            comutil.PC_INT[3] := 9001;
+            comutil.PC_BOOL[5] := true;
+            running := false;
+            EXIT;
+        END_IF;
+        currentPoint := currentPoint + 1;
+    END_FOR;
+
+    IF (running = false) OR (currentPoint >= totalPoints) THEN
+        EXIT;
+    END_IF;
+    comutil.PC_BOOL[1] := true;
+
+    WHILE comutil.PC_BOOL[2] = true DO
+        IF comutil.PC_BOOL[4] = true THEN
+            running := false;
+            EXIT;
+        END_IF;
+    END_WHILE;
+
+    (* Execute buffer B. PC_INT[10+i] maps i=25..49 to type slots 35..59. *)
+    FOR i := 25 TO 49 DO
+        IF (running = false) OR (currentPoint >= totalPoints) THEN
+            EXIT;
+        END_IF;
+        IF comutil.PC_BOOL[4] = true THEN
+            running := false;
+            EXIT;
+        END_IF;
+
+        IF comutil.PC_INT[10+i] = 1 THEN
+            CALL: comutil.GetPC_POINTJ(i);
+            MJOINT(comutil.PC_POINTJ[i], v100perc, fine, tool1);
+        ELSIF comutil.PC_INT[10+i] = 0 THEN
+            CALL: comutil.GetPC_POINTC(i);
+            IF comutil.PC_INT[2] = 100 THEN
+                MLIN(comutil.PC_POINTC[i], v100, fine, tool1);
+            ELSE
+                MLIN(comutil.PC_POINTC[i], v800, fine, tool1);
+            END_IF;
+        ELSE
+            comutil.PC_INT[3] := 9001;
+            comutil.PC_BOOL[5] := true;
+            running := false;
+            EXIT;
+        END_IF;
+        currentPoint := currentPoint + 1;
+    END_FOR;
+
+    IF (running = false) OR (currentPoint >= totalPoints) THEN
+        EXIT;
+    END_IF;
+    comutil.PC_BOOL[2] := true;
+END_WHILE;
+
+comutil.PC_BOOL[0] := true;
