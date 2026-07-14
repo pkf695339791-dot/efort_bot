@@ -16,7 +16,7 @@ ER25-2700 产品资料确认该机器人为六轴工业机器人，额定负载 
 - `GetBaseCoordinatePos2`：读取带构型参数的当前 TCP 位姿；
 - `FkSolver`、`IkSolver`：调用控制器运动学求解；
 - `MJOINT`、`MLIN`：关节插补和笛卡尔直线运动；
-- `SetPointCVector`、整型数组变量以及 RPL `comutil.PC_POINTC[]`：支持扩展现有半控队列协议。
+- `SetPointCVector`、`SetPointJVector`、整型数组变量以及 RPL `comutil.PC_POINTC[]/PC_POINTJ[]`：支持扩展现有半控队列协议。
 
 ## 3. 当前实现与问题
 
@@ -118,7 +118,8 @@ MotionSegment:
   stage
   motion_type
   target_pose
-  speed
+  joint_target_optional
+  velocity_profile_code
   zone
   confidence
 ```
@@ -159,7 +160,7 @@ y_surface = normalize(cross(z_surface, x_surface))
 
 同一施工平面默认对全部 `SafeEntry`、`Approach`、`Tie`、`Retreat` 和 `SafeExit` 使用相同工具姿态。角度归一化到连续表示，避免相邻目标出现等价欧拉角的 `+180/-180` 跳变。
 
-构型参数 `cfgx/cfg1/cfg4/cfg6` 暂时继承输入捆扎点。现场接入时使用 SDK `IkSolver` 和当前关节状态验证构型连续性；本阶段 dry-run 不伪造逆解结果。
+构型参数 `cfgx/cfg1/cfg4/cfg6` 暂时继承输入捆扎点。实机预检使用 SDK `IkSolver` 将每个 `MJoint` 的笛卡尔安全转场目标解析为 `JointPose`；任一目标无解则整条任务拒绝下发。dry-run 只验证规划几何，不伪造逆解结果。
 
 ## 8. 位置规划算法
 
@@ -188,19 +189,20 @@ transfer_clearance_mm >= retreat_distance_mm
 
 ## 9. 控制器队列协议
 
-### 9.1 PointC 缓冲
+### 9.1 PointC/PointJ 缓冲
 
-目标位姿继续写入：
+直线段的目标位姿写入 `PointC`，关节转场段经 SDK `IkSolver` 求解后写入相同槽位的 `PointJ`：
 
 ```text
 comutil.PC_POINTC[0..49]
+comutil.PC_POINTJ[0..49]
 ```
 
-保持 A/B 两个 25 点缓冲区和现有续传握手。
+保持 A/B 两个 25 槽缓冲区和现有续传握手。`PointC`、`PointJ` 和运动类型使用相同槽位；控制器只读取运动类型对应的目标数组，另一数组的该槽位为未使用占位值。
 
 ### 9.2 运动类型缓冲
 
-为每个 PointC 同步写入运动类型编码：
+为每个目标槽位同步写入运动类型编码：
 
 ```text
 PC_INT[10 + slot]
@@ -213,26 +215,26 @@ PC_INT[10 + slot]
 本设计占用以下全局控制字段：
 
 ```text
-PC_INT[1] = transfer_speed
-PC_INT[2] = local_speed
+PC_INT[1] = transfer_velocity_profile
+PC_INT[2] = local_velocity_profile
 PC_INT[3] = controller_error_code
 PC_BOOL[5] = controller_error
 ```
 
-速度值由 C++ 在启动队列前写入，控制器校验范围为 1 到 100。控制器错误标志和错误码在新任务开始时清零；出现非法运动类型或运动指令失败时，控制器置位错误标志、写入非零错误码并终止队列。
+这两个字段是速度档位选择码，不是可直接传给运动指令的数值。首阶段转场档位只接受 `100`，映射到 SDK 示例使用的关节速度对象 `v100perc`；局部直线运动接受 `100` 或 `800`，分别映射到笛卡尔速度对象 `v100` 和 `v800`。控制器错误标志和错误码在新任务开始时清零；出现非法运动类型、非法速度档位或运动指令失败时，控制器置位错误标志、写入非零错误码并终止队列。
 
-C++ 后端增加批量写入运动类型的能力。每次写入 PointC 批次时，必须先写完整点位和类型，再通过现有布尔握手通知控制器使用该缓冲区。
+C++ 后端增加 `PointJ` 和运动类型的批量写入能力。每次必须先写完 `PointC`、`PointJ` 和类型三个同步批次，再通过现有布尔握手通知控制器使用该缓冲区。
 
 ### 9.3 RPL/XPL 执行
 
 控制器读取每个槽位后按运动类型分支：
 
 ```text
-type == 1 -> MJOINT(PointC target, transfer speed, fine, tool)
-type == 0 -> MLIN(PointC target, local speed, fine, tool)
+type == 1 -> MJOINT(PointJ target, mapped joint velocity profile, fine, tool)
+type == 0 -> MLIN(PointC target, mapped Cartesian velocity profile, fine, tool)
 ```
 
-本阶段所有目标继续使用 `fine`，优先确保现场测试动作可观察、可停止。控制器分别读取 `PC_INT[1]` 和 `PC_INT[2]` 作为转场速度和局部作业速度，不再使用写死的 `v100/v800`，也不再让 C++ 配置与 RPL 固定速度互相矛盾。
+本阶段所有目标继续使用 `fine`，优先确保现场测试动作可观察、可停止。控制器分别读取 `PC_INT[1]` 和 `PC_INT[2]` 作为转场和局部作业的速度档位选择码，再显式分支到 `v100perc` 或 `v100/v800`；不把整数变量直接当作 RPL 速度对象使用。
 
 控制器不识别的运动类型必须触发停止和错误标志，不得回退为任意运动。
 
@@ -254,8 +256,8 @@ type == 0 -> MLIN(PointC target, local speed, fine, tool)
     "approach_distance_mm": 50.0,
     "retreat_distance_mm": 50.0,
     "transfer_clearance_mm": 150.0,
-    "transfer_speed": 5,
-    "local_speed": 3,
+    "transfer_velocity_profile": 100,
+    "local_velocity_profile": 100,
     "zone": -1.0
   },
   "rpl": {
@@ -276,7 +278,7 @@ type == 0 -> MLIN(PointC target, local speed, fine, tool)
 
 - 法向量和参考方向有限且可归一化；
 - 两个方向不近似平行；
-- 距离、速度和 zone 合法；
+- 距离、速度档位和 zone 合法；
 - 安全距离不小于接近和撤离距离；
 - 生成的全部位置和姿态为有限数；
 - 全部目标位于配置工作空间内；
@@ -285,10 +287,10 @@ type == 0 -> MLIN(PointC target, local speed, fine, tool)
 实机执行前增加：
 
 - 读取当前 TCP 和关节状态；
-- 使用 SDK `CheckTarget` 或 `IkSolver` 校验所有目标；
+- 使用 SDK `CheckTarget` 校验全部笛卡尔目标，并用 `IkSolver` 解析每个 `MJoint` 的 `PointJ`；
 - 任一目标无解时整条任务拒绝执行，不跳过后继续；
 - 报警、急停、伺服异常或控制器程序错误时请求停止；
-- motion type 与 PointC 批次写入失败时不得启动缓冲区。
+- motion type、PointC 或 PointJ 批次任一写入失败时不得启动缓冲区。
 
 ## 12. 测试策略
 
@@ -313,10 +315,10 @@ type == 0 -> MLIN(PointC target, local speed, fine, tool)
 
 ### 12.3 协议测试
 
-- PointC 和 motion type 使用相同槽位；
+- PointC、PointJ 和 motion type 使用相同槽位；
 - A/B 缓冲区起始索引同步；
 - 缓冲区复用前等待控制器请求；
-- 转场速度和局部速度在启动前写入并校验；
+- 转场和局部速度档位在启动前写入并校验；
 - 未知运动类型拒绝；
 - 控制器错误标志和错误码能够被 C++ 监控并转成失败结果；
 - dry-run 日志明确输出 stage、motion type、位置和姿态。
