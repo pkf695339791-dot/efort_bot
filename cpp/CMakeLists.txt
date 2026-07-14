@@ -39,6 +39,7 @@ add_executable(robot_control_tests tests/test_robot_control.cpp)
 target_link_libraries(robot_control_tests PRIVATE robot_control)
 target_compile_definitions(robot_control_tests PRIVATE
     TEST_DATA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/tie_points.json"
+    TEST_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/real_config.json"
 )
 add_test(NAME robot_control_tests COMMAND robot_control_tests)
 

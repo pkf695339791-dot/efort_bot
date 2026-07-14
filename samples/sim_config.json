@@ -2,8 +2,8 @@
   "controller_ip": "192.168.1.12",
   "tool_name": "tool_tie",
   "workobject_name": "wobj_rebar",
-  "dry_run": false,
-  "require_servo_on": true,
+  "dry_run": true,
+  "require_servo_on": false,
   "batch_size": 25,
   "surface": {
     "normal": [0.0, 0.0, 1.0],
@@ -21,10 +21,11 @@
     "local_velocity_profile": 100,
     "zone": -1.0
   },
-  "handshake_poll_s": 0.05,
-  "handshake_timeout_s": 120.0,
-  "execution_timeout_s": 300.0,
-  "monitor_poll_s": 0.1,
+  "handshake_poll_s": 0.0,
+  "handshake_timeout_s": 1.0,
+  "execution_timeout_s": 1.0,
+  "monitor_poll_s": 0.0,
+  "tie_dwell_s": 0.0,
   "workspace": {
     "x": [-1000.0, 1000.0],
     "y": [-1000.0, 1000.0],

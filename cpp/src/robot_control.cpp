@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <thread>
 
@@ -35,6 +36,26 @@ AxisLimit read_limit(const json::Value& parent, const std::string& key, AxisLimi
     if (!value || !value->is_array() || value->array().size() != 2) return fallback;
     return {value->array()[0].number_or(fallback.lower),
             value->array()[1].number_or(fallback.upper)};
+}
+
+Vector3 read_vector3(
+    const json::Value& parent, const std::string& key, const Vector3& fallback) {
+    const json::Value* value = parent.find(key);
+    if (!value) return fallback;
+    if (!value->is_array() || value->array().size() != 3) {
+        throw std::runtime_error(key + " must contain exactly three numbers");
+    }
+    const double missing = std::numeric_limits<double>::quiet_NaN();
+    Vector3 result{
+        value->array()[0].number_or(missing),
+        value->array()[1].number_or(missing),
+        value->array()[2].number_or(missing),
+    };
+    if (!std::isfinite(result.x) || !std::isfinite(result.y) ||
+        !std::isfinite(result.z)) {
+        throw std::runtime_error(key + " must contain finite numbers");
+    }
+    return result;
 }
 
 }  // namespace
@@ -108,33 +129,33 @@ std::vector<SafetyIssue> SafetyChecker::validate_tie_points(
     return issues;
 }
 
-std::vector<SafetyIssue> SafetyChecker::validate_queue(
-    const std::vector<QueuePoint>& points) const {
-    if (points.empty()) return {{"<queue>", "queue is empty"}};
+std::vector<SafetyIssue> SafetyChecker::validate_plan(
+    const std::vector<MotionSegment>& segments) const {
+    if (segments.empty()) return {{"<plan>", "motion plan is empty"}};
     std::vector<SafetyIssue> issues;
     const CartesianPose* last_tie_pose = nullptr;
-    for (const QueuePoint& point : points) {
-        auto range_issues = check_pose_ranges(point.tie_point_id, point.pose);
+    for (const MotionSegment& segment : segments) {
+        auto range_issues = check_pose_ranges(segment.tie_point_id, segment.target_pose);
         issues.insert(issues.end(), range_issues.begin(), range_issues.end());
-        if (point.kind == QueuePointKind::Tie) {
+        if (segment.stage == MotionStage::Tie) {
             if (last_tie_pose) {
-                const double spacing = distance(point.pose, *last_tie_pose);
+                const double spacing = distance(segment.target_pose, *last_tie_pose);
                 if (spacing < config_.minimum_point_spacing_mm) {
                     std::ostringstream reason;
                     reason << "tie point spacing " << spacing << " mm below minimum";
-                    issues.push_back({point.tie_point_id, reason.str()});
+                    issues.push_back({segment.tie_point_id, reason.str()});
                 }
             }
-            last_tie_pose = &point.pose;
+            last_tie_pose = &segment.target_pose;
         }
     }
     return issues;
 }
 
-TiePointQueue::TiePointQueue(const RobotControlConfig& config)
-    : config_(config), safety_checker_(config) {}
+MotionPlanBuilder::MotionPlanBuilder(const RobotControlConfig& config)
+    : config_(config), safety_checker_(config), planner_(config.surface, config.motion) {}
 
-std::vector<QueuePoint> TiePointQueue::build(const std::vector<TiePoint>& points) {
+std::vector<MotionSegment> MotionPlanBuilder::build(const std::vector<TiePoint>& points) {
     skipped_.clear();
     const auto issues = safety_checker_.validate_tie_points(points);
     std::vector<std::string> blocked_ids;
@@ -149,52 +170,33 @@ std::vector<QueuePoint> TiePointQueue::build(const std::vector<TiePoint>& points
             usable.push_back(point);
         }
     }
-    std::sort(usable.begin(), usable.end(), [](const TiePoint& lhs, const TiePoint& rhs) {
-        if (lhs.pose.x != rhs.pose.x) return lhs.pose.x < rhs.pose.x;
-        if (lhs.pose.y != rhs.pose.y) return lhs.pose.y < rhs.pose.y;
-        if (lhs.pose.z != rhs.pose.z) return lhs.pose.z < rhs.pose.z;
-        return lhs.point_id < rhs.point_id;
-    });
-
-    std::vector<QueuePoint> queue;
-    for (const TiePoint& point : usable) {
-        const CartesianPose base = coordinate_manager_.to_workobject_pose(point);
-        const std::array<std::pair<QueuePointKind, CartesianPose>, 3> segments{{
-            {QueuePointKind::Approach, base.shifted(config_.approach_offset_z_mm)},
-            {QueuePointKind::Tie, base},
-            {QueuePointKind::Retreat, base.shifted(config_.retreat_offset_z_mm)},
-        }};
-        for (const auto& segment : segments) {
-            queue.push_back({
-                queue.size(), point.point_id, segment.first, segment.second, point.confidence});
-        }
-    }
-    const auto queue_issues = safety_checker_.validate_queue(queue);
-    if (!queue_issues.empty()) {
+    auto plan = planner_.plan(usable);
+    const auto plan_issues = safety_checker_.validate_plan(plan);
+    if (!plan_issues.empty()) {
         std::ostringstream message;
-        message << "queue failed safety validation: ";
-        for (std::size_t index = 0; index < queue_issues.size(); ++index) {
+        message << "motion plan failed safety validation: ";
+        for (std::size_t index = 0; index < plan_issues.size(); ++index) {
             if (index) message << "; ";
-            message << issue_message(queue_issues[index]);
+            message << issue_message(plan_issues[index]);
         }
         throw std::runtime_error(message.str());
     }
-    return queue;
+    return plan;
 }
 
-std::vector<std::vector<QueuePoint>> TiePointQueue::batches(
-    const std::vector<QueuePoint>& points) const {
+std::vector<std::vector<MotionSegment>> MotionPlanBuilder::batches(
+    const std::vector<MotionSegment>& segments) const {
     if (config_.batch_size == 0) throw std::invalid_argument("batch_size must be positive");
-    std::vector<std::vector<QueuePoint>> result;
-    for (std::size_t start = 0; start < points.size(); start += config_.batch_size) {
-        const std::size_t end = std::min(points.size(), start + config_.batch_size);
-        result.emplace_back(points.begin() + static_cast<std::ptrdiff_t>(start),
-                            points.begin() + static_cast<std::ptrdiff_t>(end));
+    std::vector<std::vector<MotionSegment>> result;
+    for (std::size_t start = 0; start < segments.size(); start += config_.batch_size) {
+        const std::size_t end = std::min(segments.size(), start + config_.batch_size);
+        result.emplace_back(segments.begin() + static_cast<std::ptrdiff_t>(start),
+                            segments.begin() + static_cast<std::ptrdiff_t>(end));
     }
     return result;
 }
 
-const std::vector<std::string>& TiePointQueue::skipped() const { return skipped_; }
+const std::vector<std::string>& MotionPlanBuilder::skipped() const { return skipped_; }
 
 DryRunBackend::DryRunBackend(const RobotControlConfig& config) : config_(config) {}
 void DryRunBackend::connect() {
@@ -232,16 +234,18 @@ bool DryRunBackend::get_bool(unsigned index) {
     return item != bools_.end() && item->second;
 }
 void DryRunBackend::set_pointc_vector(
-    const std::vector<QueuePoint>& points, std::size_t start_index) {
+    const std::vector<MotionSegment>& segments, std::size_t start_index) {
     ensure_connected();
-    last_vector_ = points;
+    last_vector_ = segments;
     last_start_index_ = start_index;
 }
 RobotStatus DryRunBackend::read_status() {
     ensure_connected();
     return {connected_, false, false, true, false};
 }
-const std::vector<QueuePoint>& DryRunBackend::last_vector() const { return last_vector_; }
+const std::vector<MotionSegment>& DryRunBackend::last_vector() const {
+    return last_vector_;
+}
 std::size_t DryRunBackend::last_start_index() const { return last_start_index_; }
 
 EfortSdkBackend::EfortSdkBackend(const RobotControlConfig& config) : config_(config) {}
@@ -289,23 +293,23 @@ bool EfortSdkBackend::get_bool(unsigned index) {
     return value;
 }
 void EfortSdkBackend::set_pointc_vector(
-    const std::vector<QueuePoint>& points, std::size_t start_index) {
+    const std::vector<MotionSegment>& segments, std::size_t start_index) {
     std::vector<RobotAPI::PointC> values;
-    values.reserve(points.size());
-    for (std::size_t index = 0; index < points.size(); ++index) {
-        const QueuePoint& item = points[index];
+    values.reserve(segments.size());
+    for (std::size_t index = 0; index < segments.size(); ++index) {
+        const MotionSegment& item = segments[index];
         RobotAPI::PointC point{};
         point.index = static_cast<int>(start_index + index);
-        point.x = item.pose.x;
-        point.y = item.pose.y;
-        point.z = item.pose.z;
-        point.a = item.pose.a;
-        point.b = item.pose.b;
-        point.c = item.pose.c;
-        point.cfgx = item.pose.cfgx;
-        point.cfg1 = item.pose.cfg1;
-        point.cfg4 = item.pose.cfg4;
-        point.cfg6 = item.pose.cfg6;
+        point.x = item.target_pose.x;
+        point.y = item.target_pose.y;
+        point.z = item.target_pose.z;
+        point.a = item.target_pose.a;
+        point.b = item.target_pose.b;
+        point.c = item.target_pose.c;
+        point.cfgx = item.target_pose.cfgx;
+        point.cfg1 = item.target_pose.cfg1;
+        point.cfg4 = item.target_pose.cfg4;
+        point.cfg6 = item.target_pose.cfg6;
         values.push_back(point);
     }
     check(RobotAPI::SetPointCVector(values, device_id_, false), "SetPointCVector");
@@ -330,7 +334,7 @@ int EfortSdkBackend::get_int(unsigned) { connect(); return 0; }
 void EfortSdkBackend::set_bool(unsigned, bool) { connect(); }
 bool EfortSdkBackend::get_bool(unsigned) { connect(); return false; }
 void EfortSdkBackend::set_pointc_vector(
-    const std::vector<QueuePoint>&, std::size_t) { connect(); }
+    const std::vector<MotionSegment>&, std::size_t) { connect(); }
 RobotStatus EfortSdkBackend::read_status() { connect(); return {}; }
 #endif
 
@@ -344,14 +348,14 @@ RplBatchSender::RplBatchSender(
     : config_(config), backend_(backend) {}
 
 void RplBatchSender::send_batch(
-    const std::vector<QueuePoint>& batch,
+    const std::vector<MotionSegment>& batch,
     std::size_t batch_index,
     std::size_t buffer_start) {
     backend_.set_pointc_vector(batch, buffer_start);
     std::cout << "sent batch=" << batch_index << " size=" << batch.size()
               << " buffer_start=" << buffer_start
-              << " queue_range=" << batch.front().queue_index << '-'
-              << batch.back().queue_index << '\n';
+              << " sequence_range=" << batch.front().sequence_index << '-'
+              << batch.back().sequence_index << '\n';
 }
 
 void RplBatchSender::wait_for_request(unsigned bool_index) {
@@ -382,15 +386,15 @@ void RplBatchSender::wait_for_completion() {
     throw std::runtime_error("timed out waiting for XPL queue completion");
 }
 
-void RplBatchSender::send_queue(const std::vector<QueuePoint>& points) {
-    if (points.empty()) throw std::invalid_argument("cannot send an empty queue");
+void RplBatchSender::send_queue(const std::vector<MotionSegment>& segments) {
+    if (segments.empty()) throw std::invalid_argument("cannot send an empty motion plan");
     if (config_.batch_size != 25) {
         throw std::invalid_argument(
             "batch_size must be 25 because XPL buffers are fixed at 0-24 and 25-49");
     }
-    TiePointQueue queue_builder(config_);
-    const auto batches = queue_builder.batches(points);
-    backend_.set_int(config_.rpl.total_points_int, static_cast<int>(points.size()));
+    MotionPlanBuilder plan_builder(config_);
+    const auto batches = plan_builder.batches(segments);
+    backend_.set_int(config_.rpl.total_points_int, static_cast<int>(segments.size()));
     backend_.set_bool(config_.rpl.batch_done_bool, false);
     backend_.set_bool(config_.rpl.stop_bool, false);
     backend_.set_bool(config_.rpl.request_buffer_a_bool, false);
@@ -444,9 +448,9 @@ void ExecutionMonitor::wait_until_idle(double timeout_s) {
 }
 
 TieToolInterface::TieToolInterface(const RobotControlConfig& config) : config_(config) {}
-void TieToolInterface::tie(const QueuePoint& point) const {
-    std::cout << "simulated tie action point=" << point.tie_point_id
-              << " queue_index=" << point.queue_index << '\n';
+void TieToolInterface::tie(const MotionSegment& segment) const {
+    std::cout << "simulated tie action point=" << segment.tie_point_id
+              << " sequence_index=" << segment.sequence_index << '\n';
     sleep_seconds(config_.tie_dwell_s);
 }
 
@@ -454,26 +458,26 @@ RobotControlSystem::RobotControlSystem(
     RobotControlConfig config, std::unique_ptr<RobotBackend> backend)
     : config_(std::move(config)),
       backend_(backend ? std::move(backend) : create_backend(config_)),
-      queue_builder_(config_) {}
+      plan_builder_(config_) {}
 
-std::vector<QueuePoint> RobotControlSystem::run(const std::vector<TiePoint>& points) {
-    auto queue = queue_builder_.build(points);
-    std::cout << "built queue tie_points=" << points.size()
-              << " queue_points=" << queue.size()
-              << " skipped=" << queue_builder_.skipped().size() << '\n';
+std::vector<MotionSegment> RobotControlSystem::run(const std::vector<TiePoint>& points) {
+    auto plan = plan_builder_.build(points);
+    std::cout << "built motion plan tie_points=" << points.size()
+              << " segments=" << plan.size()
+              << " skipped=" << plan_builder_.skipped().size() << '\n';
     backend_->connect();
     try {
         backend_->prepare();
         ExecutionMonitor(config_, *backend_).assert_ready();
-        RplBatchSender(config_, *backend_).send_queue(queue);
+        RplBatchSender(config_, *backend_).send_queue(plan);
         if (config_.dry_run) {
             TieToolInterface tool(config_);
-            for (const QueuePoint& point : queue) {
-                if (point.kind == QueuePointKind::Tie) tool.tie(point);
+            for (const MotionSegment& segment : plan) {
+                if (segment.stage == MotionStage::Tie) tool.tie(segment);
             }
         }
         backend_->disconnect();
-        return queue;
+        return plan;
     } catch (...) {
         try {
             RplBatchSender(config_, *backend_).request_stop();
@@ -485,7 +489,7 @@ std::vector<QueuePoint> RobotControlSystem::run(const std::vector<TiePoint>& poi
 }
 
 const std::vector<std::string>& RobotControlSystem::skipped() const {
-    return queue_builder_.skipped();
+    return plan_builder_.skipped();
 }
 
 std::vector<TiePoint> load_tie_points_json(const std::string& path) {
@@ -527,8 +531,6 @@ RobotControlConfig load_config_json(const std::string& path) {
     config.workobject_name = json::string(root, "workobject_name", config.workobject_name);
     config.batch_size = static_cast<std::size_t>(
         json::number(root, "batch_size", static_cast<double>(config.batch_size)));
-    config.speed = static_cast<int>(json::number(root, "speed", config.speed));
-    config.zone = json::number(root, "zone", config.zone);
     config.dry_run = json::boolean(root, "dry_run", config.dry_run);
     config.require_servo_on =
         json::boolean(root, "require_servo_on", config.require_servo_on);
@@ -537,10 +539,6 @@ RobotControlConfig load_config_json(const std::string& path) {
         json::number(root, "duplicate_distance_mm", config.duplicate_distance_mm);
     config.minimum_point_spacing_mm =
         json::number(root, "minimum_point_spacing_mm", config.minimum_point_spacing_mm);
-    config.approach_offset_z_mm =
-        json::number(root, "approach_offset_z_mm", config.approach_offset_z_mm);
-    config.retreat_offset_z_mm =
-        json::number(root, "retreat_offset_z_mm", config.retreat_offset_z_mm);
     config.tie_dwell_s = json::number(root, "tie_dwell_s", config.tie_dwell_s);
     config.handshake_poll_s =
         json::number(root, "handshake_poll_s", config.handshake_poll_s);
@@ -550,6 +548,54 @@ RobotControlConfig load_config_json(const std::string& path) {
         json::number(root, "execution_timeout_s", config.execution_timeout_s);
     config.monitor_poll_s =
         json::number(root, "monitor_poll_s", config.monitor_poll_s);
+    if (const json::Value* surface = root.find("surface")) {
+        if (!surface->is_object()) throw std::runtime_error("surface must be an object");
+        config.surface.normal = read_vector3(*surface, "normal", config.surface.normal);
+        config.surface.x_direction =
+            read_vector3(*surface, "x_direction", config.surface.x_direction);
+        config.surface.tool_axis_sign = static_cast<int>(
+            json::number(*surface, "tool_axis_sign", config.surface.tool_axis_sign));
+        config.surface.tool_tilt_deg =
+            json::number(*surface, "tool_tilt_deg", config.surface.tool_tilt_deg);
+        config.surface.tool_roll_deg =
+            json::number(*surface, "tool_roll_deg", config.surface.tool_roll_deg);
+        const std::string convention =
+            json::string(*surface, "abc_convention", "ZYX_INTRINSIC");
+        if (convention != "ZYX_INTRINSIC") {
+            throw std::runtime_error("only abc_convention ZYX_INTRINSIC is supported");
+        }
+    }
+    if (const json::Value* motion = root.find("motion")) {
+        if (!motion->is_object()) throw std::runtime_error("motion must be an object");
+        config.motion.approach_distance_mm = json::number(
+            *motion, "approach_distance_mm", config.motion.approach_distance_mm);
+        config.motion.retreat_distance_mm = json::number(
+            *motion, "retreat_distance_mm", config.motion.retreat_distance_mm);
+        config.motion.transfer_clearance_mm = json::number(
+            *motion, "transfer_clearance_mm", config.motion.transfer_clearance_mm);
+        config.motion.transfer_velocity_profile = static_cast<int>(json::number(
+            *motion, "transfer_velocity_profile",
+            config.motion.transfer_velocity_profile));
+        config.motion.local_velocity_profile = static_cast<int>(json::number(
+            *motion, "local_velocity_profile", config.motion.local_velocity_profile));
+        config.motion.zone = json::number(*motion, "zone", config.motion.zone);
+    } else {
+        bool used_legacy_distance = false;
+        if (const json::Value* approach = root.find("approach_offset_z_mm")) {
+            config.motion.approach_distance_mm =
+                approach->number_or(config.motion.approach_distance_mm);
+            used_legacy_distance = true;
+        }
+        if (const json::Value* retreat = root.find("retreat_offset_z_mm")) {
+            config.motion.retreat_distance_mm =
+                retreat->number_or(config.motion.retreat_distance_mm);
+            used_legacy_distance = true;
+        }
+        config.motion.zone = json::number(root, "zone", config.motion.zone);
+        if (used_legacy_distance) {
+            std::cerr << "deprecated Z-offset fields are treated as surface-normal distances\n";
+        }
+    }
     if (const json::Value* workspace = root.find("workspace")) {
         config.workspace.x = read_limit(*workspace, "x", config.workspace.x);
         config.workspace.y = read_limit(*workspace, "y", config.workspace.y);
@@ -561,10 +607,16 @@ RobotControlConfig load_config_json(const std::string& path) {
     if (const json::Value* rpl = root.find("rpl")) {
         config.rpl.total_points_int = static_cast<unsigned>(
             json::number(*rpl, "total_points_int", config.rpl.total_points_int));
-        config.rpl.current_point_int = static_cast<unsigned>(
-            json::number(*rpl, "current_point_int", config.rpl.current_point_int));
+        config.rpl.transfer_velocity_profile_int = static_cast<unsigned>(json::number(
+            *rpl, "transfer_velocity_profile_int",
+            config.rpl.transfer_velocity_profile_int));
+        config.rpl.local_velocity_profile_int = static_cast<unsigned>(json::number(
+            *rpl, "local_velocity_profile_int",
+            config.rpl.local_velocity_profile_int));
         config.rpl.error_code_int = static_cast<unsigned>(
             json::number(*rpl, "error_code_int", config.rpl.error_code_int));
+        config.rpl.motion_type_int_start = static_cast<unsigned>(json::number(
+            *rpl, "motion_type_int_start", config.rpl.motion_type_int_start));
         config.rpl.request_buffer_a_bool = static_cast<unsigned>(
             json::number(*rpl, "request_buffer_a_bool", config.rpl.request_buffer_a_bool));
         config.rpl.request_buffer_b_bool = static_cast<unsigned>(
@@ -575,17 +627,10 @@ RobotControlConfig load_config_json(const std::string& path) {
             json::number(*rpl, "stop_bool", config.rpl.stop_bool));
         config.rpl.batch_done_bool = static_cast<unsigned>(
             json::number(*rpl, "batch_done_bool", config.rpl.batch_done_bool));
+        config.rpl.controller_error_bool = static_cast<unsigned>(json::number(
+            *rpl, "controller_error_bool", config.rpl.controller_error_bool));
     }
     return config;
-}
-
-std::string queue_point_kind_name(QueuePointKind kind) {
-    switch (kind) {
-        case QueuePointKind::Approach: return "approach";
-        case QueuePointKind::Tie: return "tie";
-        case QueuePointKind::Retreat: return "retreat";
-    }
-    return "unknown";
 }
 
 }  // namespace tie
