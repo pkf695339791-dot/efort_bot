@@ -3,6 +3,7 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -170,18 +171,24 @@ void test_safety() {
     tie::CartesianPose normal;
     tie::CartesianPose far = normal;
     far.x = 9999.0;
+    tie::CartesianPose non_finite = normal;
+    non_finite.y = std::numeric_limits<double>::quiet_NaN();
     const auto issues = checker.validate_tie_points({
         {"LOW", normal, 0.1, "test"},
         {"FAR", far, 0.9, "test"},
+        {"NAN", non_finite, 0.9, "test"},
     });
     bool confidence = false;
     bool outside = false;
+    bool finite = false;
     for (const auto& issue : issues) {
         confidence = confidence || issue.reason.find("confidence") != std::string::npos;
         outside = outside || issue.reason.find("outside") != std::string::npos;
+        finite = finite || issue.reason.find("finite") != std::string::npos;
     }
     require(confidence, "low confidence must be rejected");
     require(outside, "out-of-range pose must be rejected");
+    require(finite, "non-finite pose must be rejected");
 }
 
 void test_dry_run_sender() {

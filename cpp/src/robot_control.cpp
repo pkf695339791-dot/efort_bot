@@ -94,6 +94,11 @@ std::vector<SafetyIssue> SafetyChecker::check_pose_ranges(
     for (const auto& check : checks) {
         const double value = check.second.first;
         const AxisLimit limit = check.second.second;
+        if (!std::isfinite(value)) {
+            issues.push_back(
+                {point_id, std::string(check.first) + " must be finite"});
+            continue;
+        }
         if (value < limit.lower || value > limit.upper) {
             std::ostringstream reason;
             reason << check.first << '=' << value << " outside ["
