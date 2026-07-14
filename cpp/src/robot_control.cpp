@@ -256,6 +256,17 @@ void DryRunBackend::set_motion_batch(
     ensure_connected();
     last_vector_ = segments;
     last_start_index_ = target_start_index;
+    for (const auto& segment : segments) {
+        const auto& pose = segment.target_pose;
+        std::cout << "dry-run target sequence=" << segment.sequence_index
+                  << " point=" << segment.tie_point_id
+                  << " stage=" << motion_stage_name(segment.stage)
+                  << " motion_type=" << motion_type_name(segment.motion_type)
+                  << " xyz=(" << pose.x << ',' << pose.y << ',' << pose.z << ')'
+                  << " abc=(" << pose.a << ',' << pose.b << ',' << pose.c << ')'
+                  << " velocity_profile=" << segment.velocity_profile_code
+                  << " zone=" << segment.zone << '\n';
+    }
 }
 RobotStatus DryRunBackend::read_status() {
     ensure_connected();

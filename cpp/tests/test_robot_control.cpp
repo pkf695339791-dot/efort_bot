@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -196,6 +197,29 @@ void test_dry_run_sender() {
     require(inspection->last_start_index() == 25, "second batch targets buffer B");
 }
 
+void test_dry_run_logs_motion_details() {
+    tie::RobotControlConfig config;
+    tie::MotionPlanBuilder builder(config);
+    const auto plan = builder.build(make_points(1));
+    tie::DryRunBackend backend(config);
+    backend.connect();
+    std::ostringstream captured;
+    auto* previous = std::cout.rdbuf(captured.rdbuf());
+    backend.set_motion_batch(plan, 0, config.rpl.motion_type_int_start);
+    std::cout.rdbuf(previous);
+    backend.disconnect();
+    const auto log = captured.str();
+    require(log.find("stage=safe_entry") != std::string::npos,
+            "dry-run log must include the motion stage");
+    require(log.find("motion_type=MJOINT") != std::string::npos,
+            "dry-run log must include the motion type");
+    require(log.find("xyz=(") != std::string::npos && log.find("abc=(") != std::string::npos,
+            "dry-run log must include XYZ and ABC");
+    require(log.find("velocity_profile=100") != std::string::npos &&
+                log.find("zone=-1") != std::string::npos,
+            "dry-run log must include velocity profile and zone");
+}
+
 void test_double_buffer_wraps_to_a() {
     tie::RobotControlConfig config;
     config.tie_dwell_s = 0.0;
@@ -314,6 +338,7 @@ int main() {
         test_batch_boundaries();
         test_safety();
         test_dry_run_sender();
+        test_dry_run_logs_motion_details();
         test_double_buffer_wraps_to_a();
         test_real_handshake_buffer_sequence();
         test_controller_error_is_reported();
