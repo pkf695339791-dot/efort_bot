@@ -3,6 +3,9 @@
 #include "robot_types.hpp"
 
 #include <array>
+#include <optional>
+#include <string>
+#include <vector>
 
 namespace tie {
 
@@ -46,5 +49,42 @@ private:
     Vector3 normal_;
     Matrix3 tool_rotation_;
 };
+
+enum class MotionType { MLinear = 0, MJoint = 1 };
+enum class MotionStage { SafeEntry, Approach, Tie, Retreat, SafeExit };
+
+struct MotionPlanningConfig {
+    double approach_distance_mm{50.0};
+    double retreat_distance_mm{50.0};
+    double transfer_clearance_mm{150.0};
+    int transfer_velocity_profile{100};
+    int local_velocity_profile{100};
+    double zone{-1.0};
+};
+
+struct MotionSegment {
+    std::size_t sequence_index{};
+    std::string tie_point_id;
+    MotionStage stage{MotionStage::SafeEntry};
+    MotionType motion_type{MotionType::MJoint};
+    CartesianPose target_pose;
+    std::optional<JointPose> joint_target;
+    int velocity_profile_code{100};
+    double zone{-1.0};
+    double confidence{};
+};
+
+class SafeTransferPlanner {
+public:
+    SafeTransferPlanner(SurfaceFrameConfig surface, MotionPlanningConfig motion);
+    std::vector<MotionSegment> plan(const std::vector<TiePoint>& points) const;
+
+private:
+    SurfacePoseCorrector pose_corrector_;
+    MotionPlanningConfig motion_;
+};
+
+std::string motion_stage_name(MotionStage stage);
+std::string motion_type_name(MotionType type);
 
 }  // namespace tie

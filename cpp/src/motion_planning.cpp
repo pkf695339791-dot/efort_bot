@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <tuple>
+#include <utility>
 
 namespace tie {
 namespace {
@@ -121,5 +123,109 @@ CartesianPose SurfacePoseCorrector::corrected_pose(const CartesianPose& input) c
 }
 
 const Vector3& SurfacePoseCorrector::normal() const { return normal_; }
+
+namespace {
+
+CartesianPose shifted_along(
+    const CartesianPose& pose, const Vector3& normal, double distance_mm) {
+    CartesianPose shifted = pose;
+    shifted.x += normal.x * distance_mm;
+    shifted.y += normal.y * distance_mm;
+    shifted.z += normal.z * distance_mm;
+    return shifted;
+}
+
+bool finite_non_negative(double value) {
+    return std::isfinite(value) && value >= 0.0;
+}
+
+}  // namespace
+
+SafeTransferPlanner::SafeTransferPlanner(
+    SurfaceFrameConfig surface, MotionPlanningConfig motion)
+    : pose_corrector_(surface), motion_(motion) {
+    if (motion_.transfer_velocity_profile != 100) {
+        throw std::invalid_argument("transfer_velocity_profile must be 100");
+    }
+    if (motion_.local_velocity_profile != 100 &&
+        motion_.local_velocity_profile != 800) {
+        throw std::invalid_argument("local_velocity_profile must be 100 or 800");
+    }
+    if (!finite_non_negative(motion_.approach_distance_mm) ||
+        !finite_non_negative(motion_.retreat_distance_mm) ||
+        !finite_non_negative(motion_.transfer_clearance_mm)) {
+        throw std::invalid_argument("motion distances must be finite and non-negative");
+    }
+    if (motion_.zone != -1.0) {
+        throw std::invalid_argument("zone must be -1.0 (fine)");
+    }
+    if (motion_.transfer_clearance_mm < motion_.approach_distance_mm ||
+        motion_.transfer_clearance_mm < motion_.retreat_distance_mm) {
+        throw std::invalid_argument(
+            "transfer clearance must cover approach and retreat distances");
+    }
+}
+
+std::vector<MotionSegment> SafeTransferPlanner::plan(
+    const std::vector<TiePoint>& points) const {
+    std::vector<TiePoint> ordered = points;
+    std::sort(ordered.begin(), ordered.end(), [](const TiePoint& lhs, const TiePoint& rhs) {
+        if (lhs.pose.x != rhs.pose.x) return lhs.pose.x < rhs.pose.x;
+        if (lhs.pose.y != rhs.pose.y) return lhs.pose.y < rhs.pose.y;
+        if (lhs.pose.z != rhs.pose.z) return lhs.pose.z < rhs.pose.z;
+        return lhs.point_id < rhs.point_id;
+    });
+
+    std::vector<MotionSegment> result;
+    result.reserve(ordered.size() * 5);
+    for (const TiePoint& point : ordered) {
+        const CartesianPose tie_pose = pose_corrector_.corrected_pose(point.pose);
+        const std::array<std::tuple<MotionStage, MotionType, double, int>, 5> stages{{
+            {MotionStage::SafeEntry, MotionType::MJoint,
+             motion_.transfer_clearance_mm, motion_.transfer_velocity_profile},
+            {MotionStage::Approach, MotionType::MLinear,
+             motion_.approach_distance_mm, motion_.local_velocity_profile},
+            {MotionStage::Tie, MotionType::MLinear, 0.0,
+             motion_.local_velocity_profile},
+            {MotionStage::Retreat, MotionType::MLinear,
+             motion_.retreat_distance_mm, motion_.local_velocity_profile},
+            {MotionStage::SafeExit, MotionType::MLinear,
+             motion_.transfer_clearance_mm, motion_.local_velocity_profile},
+        }};
+        for (const auto& stage : stages) {
+            MotionSegment segment;
+            segment.sequence_index = result.size();
+            segment.tie_point_id = point.point_id;
+            segment.stage = std::get<0>(stage);
+            segment.motion_type = std::get<1>(stage);
+            segment.target_pose = shifted_along(
+                tie_pose, pose_corrector_.normal(), std::get<2>(stage));
+            segment.velocity_profile_code = std::get<3>(stage);
+            segment.zone = motion_.zone;
+            segment.confidence = point.confidence;
+            result.push_back(std::move(segment));
+        }
+    }
+    return result;
+}
+
+std::string motion_stage_name(MotionStage stage) {
+    switch (stage) {
+        case MotionStage::SafeEntry: return "safe_entry";
+        case MotionStage::Approach: return "approach";
+        case MotionStage::Tie: return "tie";
+        case MotionStage::Retreat: return "retreat";
+        case MotionStage::SafeExit: return "safe_exit";
+    }
+    return "unknown";
+}
+
+std::string motion_type_name(MotionType type) {
+    switch (type) {
+        case MotionType::MLinear: return "MLIN";
+        case MotionType::MJoint: return "MJOINT";
+    }
+    return "UNKNOWN";
+}
 
 }  // namespace tie
