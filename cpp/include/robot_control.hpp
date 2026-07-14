@@ -1,5 +1,7 @@
 #pragma once
 
+#include "robot_types.hpp"
+
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -57,28 +59,6 @@ struct RobotControlConfig {
     double monitor_poll_s{0.1};
     WorkspaceLimits workspace{};
     RplVariableMap rpl{};
-};
-
-struct CartesianPose {
-    double x{};
-    double y{};
-    double z{};
-    double a{180.0};
-    double b{};
-    double c{180.0};
-    int cfgx{};
-    int cfg1{};
-    int cfg4{};
-    int cfg6{};
-
-    CartesianPose shifted(double dz) const;
-};
-
-struct TiePoint {
-    std::string point_id;
-    CartesianPose pose;
-    double confidence{1.0};
-    std::string source{"offline"};
 };
 
 enum class QueuePointKind { Approach, Tie, Retreat };

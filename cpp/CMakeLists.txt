@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(EFORT_WITH_SDK "Build the real Efort SDK backend" OFF)
 
 add_library(robot_control
+    src/motion_planning.cpp
     src/robot_control.cpp
 )
 target_include_directories(robot_control PUBLIC include)
@@ -40,3 +41,7 @@ target_compile_definitions(robot_control_tests PRIVATE
     TEST_DATA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/tie_points.json"
 )
 add_test(NAME robot_control_tests COMMAND robot_control_tests)
+
+add_executable(motion_planning_tests tests/test_motion_planning.cpp)
+target_link_libraries(motion_planning_tests PRIVATE robot_control)
+add_test(NAME motion_planning_tests COMMAND motion_planning_tests)
