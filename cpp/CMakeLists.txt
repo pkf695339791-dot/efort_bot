@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(EFORT_WITH_SDK "Build the real Efort SDK backend" OFF)
+set(EFORT_SDK_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../埃弗顿机器人/SDK V2.8/V2.8.0"
+    CACHE PATH "Path to the Efort SDK V2.8.0 root")
 
 add_library(robot_control
     src/motion_planning.cpp
@@ -17,7 +20,9 @@ if(EFORT_WITH_SDK)
     if(NOT WIN32)
         message(FATAL_ERROR "The configured Efort SDK library is the Windows x64 build")
     endif()
-    set(EFORT_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../埃弗顿机器人/SDK V2.8/V2.8.0")
+    if(NOT EXISTS "${EFORT_SDK_ROOT}/include/EfortSdk.h")
+        message(FATAL_ERROR "EFORT_SDK_ROOT does not contain include/EfortSdk.h")
+    endif()
     target_compile_definitions(robot_control PRIVATE EFORT_WITH_SDK)
     target_include_directories(robot_control PRIVATE "${EFORT_SDK_ROOT}/include")
     target_link_libraries(robot_control PRIVATE "${EFORT_SDK_ROOT}/libs/x64/EftSdk.lib")

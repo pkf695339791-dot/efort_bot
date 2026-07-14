@@ -115,6 +115,8 @@ public:
     virtual void connect() = 0;
     virtual void disconnect() noexcept = 0;
     virtual void prepare() = 0;
+    virtual std::vector<MotionSegment> prepare_targets(
+        const std::vector<MotionSegment>& segments) = 0;
     virtual void set_int(unsigned index, int value) = 0;
     virtual int get_int(unsigned index) = 0;
     virtual void set_bool(unsigned index, bool value) = 0;
@@ -132,6 +134,8 @@ public:
     void connect() override;
     void disconnect() noexcept override;
     void prepare() override;
+    std::vector<MotionSegment> prepare_targets(
+        const std::vector<MotionSegment>& segments) override;
     void set_int(unsigned index, int value) override;
     int get_int(unsigned index) override;
     void set_bool(unsigned index, bool value) override;
@@ -161,6 +165,8 @@ public:
     void connect() override;
     void disconnect() noexcept override;
     void prepare() override;
+    std::vector<MotionSegment> prepare_targets(
+        const std::vector<MotionSegment>& segments) override;
     void set_int(unsigned index, int value) override;
     int get_int(unsigned index) override;
     void set_bool(unsigned index, bool value) override;

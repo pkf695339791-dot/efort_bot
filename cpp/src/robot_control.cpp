@@ -215,6 +215,22 @@ void DryRunBackend::prepare() {
     std::cout << "dry-run prepare tool=" << config_.tool_name
               << " workobject=" << config_.workobject_name << '\n';
 }
+std::vector<MotionSegment> DryRunBackend::prepare_targets(
+    const std::vector<MotionSegment>& segments) {
+    ensure_connected();
+    const auto issues = SafetyChecker(config_).validate_plan(segments);
+    if (!issues.empty()) {
+        throw std::runtime_error(
+            "dry-run target validation failed: " + issue_message(issues.front()));
+    }
+    for (const MotionSegment& segment : segments) {
+        if (segment.motion_type == MotionType::MJoint) {
+            std::cout << "dry-run preflight sequence=" << segment.sequence_index
+                      << " joint_target=unresolved(dry-run)\n";
+        }
+    }
+    return segments;
+}
 void DryRunBackend::set_int(unsigned index, int value) {
     ensure_connected();
     ints_[index] = value;
@@ -277,6 +293,65 @@ void EfortSdkBackend::prepare() {
     if (config_.require_servo_on && !status.servo_on) {
         throw std::runtime_error("servo is not on");
     }
+}
+std::vector<MotionSegment> EfortSdkBackend::prepare_targets(
+    const std::vector<MotionSegment>& segments) {
+    RobotAPI::RobotJoint current_joints;
+    RobotAPI::RobotPos current_pose;
+    check(RobotAPI::GetJointPos(current_joints, device_id_), "GetJointPos");
+    check(RobotAPI::GetBaseCoordinatePos2(current_pose, device_id_),
+          "GetBaseCoordinatePos2");
+    std::cout << "robot start tcp="
+              << current_pose.x << ',' << current_pose.y << ',' << current_pose.z
+              << ',' << current_pose.a << ',' << current_pose.b << ',' << current_pose.c
+              << " joints=" << current_joints.j[0] << ',' << current_joints.j[1]
+              << ',' << current_joints.j[2] << ',' << current_joints.j[3]
+              << ',' << current_joints.j[4] << ',' << current_joints.j[5] << '\n';
+
+    auto prepared = segments;
+    for (MotionSegment& segment : prepared) {
+        RobotAPI::PointC point_c;
+        point_c.x = segment.target_pose.x;
+        point_c.y = segment.target_pose.y;
+        point_c.z = segment.target_pose.z;
+        point_c.a = segment.target_pose.a;
+        point_c.b = segment.target_pose.b;
+        point_c.c = segment.target_pose.c;
+        point_c.cfgx = static_cast<unsigned>(segment.target_pose.cfgx);
+        point_c.cfg1 = segment.target_pose.cfg1;
+        point_c.cfg4 = segment.target_pose.cfg4;
+        point_c.cfg6 = segment.target_pose.cfg6;
+        check(RobotAPI::CheckTarget(
+                  point_c, config_.tool_name, config_.workobject_name, device_id_),
+              "CheckTarget sequence " + std::to_string(segment.sequence_index));
+
+        if (segment.motion_type != MotionType::MJoint) continue;
+        RobotAPI::RobotPos robot_pos;
+        robot_pos.x = segment.target_pose.x;
+        robot_pos.y = segment.target_pose.y;
+        robot_pos.z = segment.target_pose.z;
+        robot_pos.a = segment.target_pose.a;
+        robot_pos.b = segment.target_pose.b;
+        robot_pos.c = segment.target_pose.c;
+        robot_pos.cfgx = segment.target_pose.cfgx;
+        robot_pos.cfg1 = segment.target_pose.cfg1;
+        robot_pos.cfg4 = segment.target_pose.cfg4;
+        robot_pos.cfg6 = segment.target_pose.cfg6;
+        RobotAPI::RobotJoint robot_joint;
+        check(RobotAPI::IkSolver(
+                  robot_pos,
+                  robot_joint,
+                  config_.tool_name,
+                  config_.workobject_name,
+                  device_id_),
+              "IkSolver sequence " + std::to_string(segment.sequence_index));
+        JointPose joint_target;
+        for (std::size_t axis = 0; axis < joint_target.joints.size(); ++axis) {
+            joint_target.joints[axis] = robot_joint.j[axis];
+        }
+        segment.joint_target = joint_target;
+    }
+    return prepared;
 }
 void EfortSdkBackend::set_int(unsigned index, int value) {
     check(RobotAPI::SetIntVariable(index, value, device_id_), "SetIntVariable");
@@ -364,6 +439,11 @@ void EfortSdkBackend::connect() {
 }
 void EfortSdkBackend::disconnect() noexcept {}
 void EfortSdkBackend::prepare() { connect(); }
+std::vector<MotionSegment> EfortSdkBackend::prepare_targets(
+    const std::vector<MotionSegment>&) {
+    connect();
+    return {};
+}
 void EfortSdkBackend::set_int(unsigned, int) { connect(); }
 int EfortSdkBackend::get_int(unsigned) { connect(); return 0; }
 void EfortSdkBackend::set_bool(unsigned, bool) { connect(); }
@@ -523,6 +603,7 @@ std::vector<MotionSegment> RobotControlSystem::run(const std::vector<TiePoint>& 
     try {
         backend_->prepare();
         ExecutionMonitor(config_, *backend_).assert_ready();
+        plan = backend_->prepare_targets(plan);
         RplBatchSender(config_, *backend_).send_queue(plan);
         if (config_.dry_run) {
             TieToolInterface tool(config_);

@@ -16,6 +16,22 @@ public:
     void connect() override { connected = true; }
     void disconnect() noexcept override { connected = false; }
     void prepare() override {}
+    std::vector<tie::MotionSegment> prepare_targets(
+        const std::vector<tie::MotionSegment>& segments) override {
+        ++prepare_target_calls;
+        if (reject_preflight) {
+            throw std::runtime_error("target 2 rejected by preflight");
+        }
+        auto prepared = segments;
+        for (auto& segment : prepared) {
+            if (segment.motion_type == tie::MotionType::MJoint) {
+                tie::JointPose joints;
+                joints.joints = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
+                segment.joint_target = joints;
+            }
+        }
+        return prepared;
+    }
     void set_int(unsigned index, int value) override { ints[index] = value; }
     int get_int(unsigned index) override {
         if (force_controller_error && index == forced_error_code_index) {
@@ -40,6 +56,10 @@ public:
         std::vector<int> batch_types;
         for (const auto& segment : segments) {
             batch_types.push_back(static_cast<int>(segment.motion_type));
+            if (segment.motion_type == tie::MotionType::MJoint &&
+                !segment.joint_target.has_value()) {
+                all_joint_targets_resolved = false;
+            }
         }
         type_batches.push_back(std::move(batch_types));
     }
@@ -57,6 +77,9 @@ public:
     unsigned forced_error_bool_index{5};
     unsigned forced_error_code_index{3};
     int forced_error_code{9001};
+    bool reject_preflight{};
+    int prepare_target_calls{};
+    bool all_joint_targets_resolved{true};
 };
 
 void require(bool condition, const std::string& message) {
@@ -199,6 +222,38 @@ void test_controller_error_is_reported() {
     throw std::runtime_error("controller error flag must fail queue execution");
 }
 
+void test_preflight_rejects_before_any_batch() {
+    tie::RobotControlConfig config;
+    config.tie_dwell_s = 0.0;
+    auto backend = std::make_unique<HandshakeBackend>();
+    auto* inspection = backend.get();
+    inspection->reject_preflight = true;
+    tie::RobotControlSystem system(config, std::move(backend));
+    try {
+        system.run(make_points(1));
+    } catch (const std::runtime_error& error) {
+        require(std::string(error.what()).find("preflight") != std::string::npos,
+                "preflight rejection must be reported");
+        require(inspection->target_starts.empty(),
+                "preflight failure must occur before any batch write");
+        return;
+    }
+    throw std::runtime_error("invalid target must reject the complete task");
+}
+
+void test_preflight_resolves_mjoint_targets() {
+    tie::RobotControlConfig config;
+    config.tie_dwell_s = 0.0;
+    auto backend = std::make_unique<HandshakeBackend>();
+    auto* inspection = backend.get();
+    tie::RobotControlSystem system(config, std::move(backend));
+    system.run(make_points(1));
+    require(inspection->prepare_target_calls == 1,
+            "target preflight must run exactly once");
+    require(inspection->all_joint_targets_resolved,
+            "every MJOINT batch target must contain a joint solution");
+}
+
 void test_json_loading() {
 #ifdef TEST_DATA_PATH
     const auto points = tie::load_tie_points_json(TEST_DATA_PATH);
@@ -229,6 +284,8 @@ int main() {
         test_double_buffer_wraps_to_a();
         test_real_handshake_buffer_sequence();
         test_controller_error_is_reported();
+        test_preflight_rejects_before_any_batch();
+        test_preflight_resolves_mjoint_targets();
         test_json_loading();
         std::cout << "All C++ robot control tests passed.\n";
         return 0;
