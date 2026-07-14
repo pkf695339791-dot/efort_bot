@@ -1,66 +1,49 @@
-# TIE_QUEUE_SIM.XPL 使用说明
+# TIE_QUEUE_SIM 控制器程序说明
 
-`TIE_QUEUE_SIM.XPL` 是一个给墨斗/控制器使用的半控队列程序模板，基于 SDK 示例 `DEMO_TRACK.XPL` 改名整理。
+`TIE_QUEUE_SIM.XPL` 是可导入墨斗/控制器的混合运动双缓冲模板，`TIE_QUEUE_SIM.pgm` 是便于审阅的等价逻辑。上位机同时下发笛卡尔目标 `PointC`、关节目标 `PointJ` 和运动类型；控制器按槽位选择 `MJOINT` 或 `MLIN`。
 
-它不是单独硬编码轨迹的空跑程序。它需要上位机先通过 SDK 下发 `PointC` 点位，然后它在控制器里读取点位并运动。
-
-## 运行链路
+## 执行序列
 
 ```text
-上位机 Python/C++ 程序
-  -> SetPointCVector 下发 PointC 点位
-  -> PC_INT[0] 写入点位总数
-  -> PC_BOOL[3] = true 通知开始
-
-控制器 TIE_QUEUE_SIM.XPL
-  -> 等待 PC_BOOL[3]
-  -> comutil.GetPC_POINTC 读取点位
-  -> mlin 直线运动到点
-  -> PC_BOOL[1]/PC_BOOL[2] 请求下一批缓冲
-  -> PC_BOOL[0] 表示执行结束
+当前位置 -> MJOINT SafeEntry
+SafeEntry -> MLIN Approach -> MLIN Tie -> MLIN Retreat -> MLIN SafeExit
+SafeExit -> MJOINT 下一个 SafeEntry
 ```
 
-## 变量约定
+类型码 `1` 读取 `PC_POINTJ[i]` 并执行 `MJOINT(..., v100perc, fine, tool1)`；类型码 `0` 读取 `PC_POINTC[i]`，根据局部速度档执行 `MLIN(..., v100/v800, fine, tool1)`。
 
-- `comutil.PC_INT[0]`: 点位总数
-- `comutil.PC_BOOL[3]`: 上位机置位，开始运行
-- `comutil.PC_BOOL[1]`: XPL 请求上位机发送前半缓冲
-- `comutil.PC_BOOL[2]`: XPL 请求上位机发送后半缓冲
-- `comutil.PC_BOOL[0]`: XPL 置位，表示队列结束
-- `comutil.PC_POINTC[0..49]`: 控制器侧 PointC 缓冲
+## 变量映射
 
-## 使用步骤
+| 变量 | 方向 | 含义 |
+|---|---|---|
+| `PC_INT[0]` | PC -> 控制器 | 本次运动段总数 |
+| `PC_INT[1]` | PC -> 控制器 | MJOINT 速度档，仅支持 `100` |
+| `PC_INT[2]` | PC -> 控制器 | MLIN 速度档，支持 `100`、`800` |
+| `PC_INT[3]` | 控制器 -> PC | 错误码 |
+| `PC_INT[10..59]` | PC -> 控制器 | 与槽位对应的运动类型，`0=MLIN`、`1=MJOINT` |
+| `PC_POINTC[0..49]` | PC -> 控制器 | 笛卡尔目标双缓冲 |
+| `PC_POINTJ[0..49]` | PC -> 控制器 | 关节目标双缓冲 |
+| `PC_BOOL[0]` | 控制器 -> PC | 整条队列完成 |
+| `PC_BOOL[1]` | 控制器 -> PC | A 缓冲区 `0..24` 可重填 |
+| `PC_BOOL[2]` | 控制器 -> PC | B 缓冲区 `25..49` 可重填 |
+| `PC_BOOL[3]` | PC -> 控制器 | 初始缓冲已装载，开始执行 |
+| `PC_BOOL[4]` | PC -> 控制器 | 请求停止 |
+| `PC_BOOL[5]` | 控制器 -> PC | 控制器程序错误 |
 
-1. 在墨斗 IDE 中打开或导入 `TIE_QUEUE_SIM.XPL`。
-2. 检查程序里的工具坐标和工件坐标：
-   - 当前工具名: `tool1`
-   - 当前工件坐标: `wobj_cvy`
-3. 如果现场使用的是 `tool_tie` / `wobj_rebar`，需要在墨斗里把 `tool1` 和 `wobj_cvy` 改成对应名字。
-4. 上传/保存到控制器。
-5. 控制器上伺服，低速/仿真模式运行该 XPL 程序。
-6. 电脑运行上位机程序，向控制器下发点位并启动。
+错误码：`9001` 表示运动类型无效，`9002` 表示速度档位无效。控制器置位 `PC_BOOL[5]` 后，上位机读取 `PC_INT[3]` 并终止任务。
 
-## 和当前 Python 原型配合
+## 导入与现场检查
 
-当前 Python 原型默认是 dry-run，不会连接真实机器人。
+1. 在墨斗 IDE 中导入 `TIE_QUEUE_SIM.XPL`；如控制器版本不兼容，以同版本厂商示例的 XML 结构重新保存。
+2. 将模板中的 `tool1`、`wobj_cvy` 改为现场已标定的工具和工件坐标名称，或使上位机配置与模板保持一致。
+3. 检查控制器已有命名速度对象 `v100perc`、`v100`、`v800` 和 `fine`。
+4. 确认 50 个 PointC/PointJ 槽位及 `PC_INT[10..59]` 没有与其他程序冲突。
+5. 先使用 `samples/sim_config.json` 完成 C++ dry-run；这不是机器人仿真。
+6. 现场首次联调只保留一个绑扎点，以示教/低速倍率验证 SafeEntry、Approach、Tie、Retreat、SafeExit 的方向和姿态，再逐步增加点数。
 
-真实联调时才使用：
+## 安全边界
 
-```powershell
-python run_tie_queue.py --points samples\tie_points.json --real-robot
-```
-
-第一次联调建议只放 3 个点，也就是一个绑扎点的：
-
-```text
-approach -> tie -> retreat
-```
-
-确认方向、姿态、速度、坐标系都正确后，再增加点数。
-
-## 注意
-
-- 该模板里的运动指令是 `mlin`，速度是 `v800`，zone 是 `fine`。
-- 真实机械臂首次运行前请把速度倍率调低。
-- 如果墨斗打开后提示语法或版本不兼容，请用墨斗重新保存一次，或以厂家 `DEMO_TRACK.XPL` 为模板手工替换标题和坐标系。
-- 末端绑扎 IO 尚未加入本模板。后续可以在每三个点中的第二个点后插入 DO/DI 逻辑。
+- SDK 真实模式会在下发运动前使用控制器 `CheckTarget` 和 `IkSolver` 预检，但这不等于连杆级碰撞检测。
+- 当前没有 URDF、连杆碰撞体或现场障碍物几何，未实现 RRT/PRM 或在线避障。
+- 末端绑扎 DO/DI 工艺逻辑尚未加入模板；`Tie` 段只负责运动到作业位。
+- 本模板尚未完成仿真验证或实机验证，必须按现场安全规程低速、单点、有人监护地测试。

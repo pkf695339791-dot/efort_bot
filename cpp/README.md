@@ -1,47 +1,61 @@
-# 埃夫特绑扎机械臂 C++ 控制程序
+# ER25-2700 机械臂 C++ 控制程序
 
-该目录是原 Python 原型的 C++17 迁移版，包含：
+本目录包含纯 C++17 的绑扎机械臂控制实现，不包含 Python 原型。程序完成点位筛选、施工面姿态修正、五阶段运动规划、控制器目标预检和 25 槽双缓冲下发。
 
-- JSON 绑扎点与配置读取
-- `approach -> tie -> retreat` 三段运动队列
-- 置信度、重复点、间距和工作空间检查
-- 25 点分批与 `PC_INT` / `PC_BOOL` 握手
-- dry-run 和真实埃夫特 SDK 两种后端
-- 报警、急停、伺服状态检查及异常停止
-- C++ 单元测试
+## 运动控制逻辑
 
-控制器端继续使用仓库根目录的 `TIE_QUEUE_SIM.XPL`。当前 XPL 仍以 `mlin`
-执行所有 `PointC`，尚未加入 `PointJ/mjoint` 混合运动。
+每个合格绑扎点生成五个 `MotionSegment`：
 
-双缓冲固定为 `PC_POINTC[0..24]` 和 `PC_POINTC[25..49]`。程序在启动前
-预装两批点位；XPL 完成一整块缓冲区后才通过 `PC_BOOL[1]` 或
-`PC_BOOL[2]` 请求覆写，并通过 `PC_BOOL[0]` 报告整条队列完成。
-`PC_BOOL[4]` 用于请求停止，因此 `batch_size` 必须保持为 25。
+```text
+当前位置 -> MJOINT SafeEntry
+SafeEntry -> MLIN Approach
+Approach  -> MLIN Tie
+Tie       -> MLIN Retreat
+Retreat   -> MLIN SafeExit
+SafeExit  -> MJOINT 下一个 SafeEntry
+```
 
-## 构建 dry-run
+- `SafeEntry`：位于绑扎点沿施工面法向的安全高度，用 `MJOINT` 从当前状态转移。
+- `Approach`：沿法向下降到接近点。
+- `Tie`：到达作业点；绑扎 IO/工艺动作仍需现场接入。
+- `Retreat`：沿法向撤离作业面。
+- `SafeExit`：回到安全高度，为下一个绑扎点转移做准备。
 
-在安装了 CMake 和 Visual Studio C++ Build Tools 的终端中执行：
+`surface.normal` 定义施工面法向，`surface.x_direction` 定义面内 X 方向。程序将二者正交化为施工面坐标架，并按 `tool_axis_sign`、`tool_tilt_deg`、`tool_roll_deg` 生成工具 ZYX 姿态。接近、撤离和安全高度都沿法向计算，所以倾斜面会同时改变 X/Y/Z，而不是只沿世界坐标 Z 轴移动。
+
+当前 SafeEntry 之间的转移是 `MJOINT` 目标转移，不是带障碍物约束的全局路径搜索。STEP 模型尚未转换成 URDF/碰撞体，现场障碍物尚未注册，因此不要把该逻辑视为完整避障。
+
+## 构建与测试
+
+普通 dry-run 版本：
 
 ```powershell
-cmake -S cpp -B cpp\build
+cmake -S cpp -B cpp\build -A x64
 cmake --build cpp\build --config Release
 ctest --test-dir cpp\build -C Release --output-on-failure
 ```
 
-运行示例：
+运行水平面示例：
 
 ```powershell
-cpp\build\Release\run_tie_queue.exe --points samples\tie_points.json
+cpp\build\Release\run_tie_queue.exe `
+  --points samples\tie_points.json `
+  --config samples\sim_config.json
 ```
 
-## 构建真实 SDK 版本
+`sim_config.json` 固定 `dry_run=true`，不会连接控制器。输出逐段包含阶段、运动类型、XYZ、ABC、速度档位和 zone；`MJOINT` 预检会明确显示 `joint_target=unresolved(dry-run)`，表示没有做真实控制器逆解。
+
+真实 SDK 版本：
 
 ```powershell
-cmake -S cpp -B cpp\build-sdk -DEFORT_WITH_SDK=ON -A x64
+cmake -S cpp -B cpp\build-sdk -A x64 `
+  -DEFORT_WITH_SDK=ON `
+  "-DEFORT_SDK_ROOT=C:\path\to\SDK V2.8\V2.8.0"
 cmake --build cpp\build-sdk --config Release
+ctest --test-dir cpp\build-sdk -C Release --output-on-failure
 ```
 
-SDK 版本会链接仓库中的 `EftSdk.lib`，并在构建后复制 `EftSdk.dll`。实机运行：
+只有在配置与现场检查完成后才运行：
 
 ```powershell
 cpp\build-sdk\Release\run_tie_queue.exe `
@@ -50,18 +64,26 @@ cpp\build-sdk\Release\run_tie_queue.exe `
   --real-robot
 ```
 
-首次实机运行前必须确认控制器 IP、工具名、工件坐标系、姿态、工作空间和低速倍率。
-`samples/real_config.json` 是由 C++ 直接读取的 JSON 配置，不依赖 Python。
+真实模式会先读取当前关节/基坐标状态，对全部笛卡尔目标调用 `CheckTarget`，并对所有 `MJOINT` 目标调用控制器 `IkSolver`。任一目标失败时，整条任务会在首批运动下发前终止。
+
+## 配置重点
+
+- `surface`：施工面法向、面内方向、工具轴方向及附加倾角/滚角。
+- `motion`：接近距离、撤离距离、安全高度、速度档位和 `fine` zone。
+- `workspace`：上位机侧笛卡尔范围，只是第一层边界检查。
+- `rpl`：双缓冲、运动类型、速度档位与错误反馈变量索引。
+- `tool_name` / `workobject_name`：必须与控制器中实际名称一致。
+
+当前仅支持传递速度档 `100 -> v100perc`，局部直线速度档 `100 -> v100` 或 `800 -> v800`，所有点使用 `fine`（配置值 `zone=-1.0`）。
 
 ## 与视觉 C++ 集成
 
-视觉模块只需构造 `std::vector<tie::TiePoint>`，然后调用：
+视觉模块构造 `std::vector<tie::TiePoint>` 后调用：
 
 ```cpp
 tie::RobotControlConfig config;
 tie::RobotControlSystem controller(config);
-controller.run(detected_points);
+const auto plan = controller.run(detected_points);
 ```
 
-坐标标定矩阵应接入 `CoordinateManager::to_workobject_pose()`。机械臂控制权应只由
-`RobotControlSystem` 持有，避免视觉线程与控制线程同时调用 SDK。
+现场标定变换暂不在本阶段实现。接入时应在进入 `RobotControlSystem` 前把视觉点统一变换到配置所声明的工件坐标系，并保证只有控制线程调用 SDK。
