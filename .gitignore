@@ -5,3 +5,4 @@ logs/
 .mypy_cache/
 .ruff_cache/
 cpp/build*/
+.worktrees/

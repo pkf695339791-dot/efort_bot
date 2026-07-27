@@ -6,8 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(EFORT_WITH_SDK "Build the real Efort SDK backend" OFF)
+set(EFORT_SDK_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../埃弗顿机器人/SDK V2.8/V2.8.0"
+    CACHE PATH "Path to the Efort SDK V2.8.0 root")
 
 add_library(robot_control
+    src/motion_planning.cpp
     src/robot_control.cpp
 )
 target_include_directories(robot_control PUBLIC include)
@@ -16,7 +20,9 @@ if(EFORT_WITH_SDK)
     if(NOT WIN32)
         message(FATAL_ERROR "The configured Efort SDK library is the Windows x64 build")
     endif()
-    set(EFORT_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../埃弗顿机器人/SDK V2.8/V2.8.0")
+    if(NOT EXISTS "${EFORT_SDK_ROOT}/include/EfortSdk.h")
+        message(FATAL_ERROR "EFORT_SDK_ROOT does not contain include/EfortSdk.h")
+    endif()
     target_compile_definitions(robot_control PRIVATE EFORT_WITH_SDK)
     target_include_directories(robot_control PRIVATE "${EFORT_SDK_ROOT}/include")
     target_link_libraries(robot_control PRIVATE "${EFORT_SDK_ROOT}/libs/x64/EftSdk.lib")
@@ -26,6 +32,35 @@ if(EFORT_WITH_SDK)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${EFORT_RUNTIME_DLL}"
                 "$<TARGET_FILE_DIR:robot_control>"
+        )
+    endforeach()
+
+    # A small, direct SDK program for commissioning one taught Cartesian tie point.
+    # It deliberately bypasses the queued XPL program so the tie-tool DO can be
+    # switched exactly after the TCP reaches the target.
+    add_executable(run_single_point_tie src/single_point_tie.cpp)
+    target_include_directories(run_single_point_tie PRIVATE "${EFORT_SDK_ROOT}/include")
+    target_link_libraries(run_single_point_tie PRIVATE
+        "${EFORT_SDK_ROOT}/libs/x64/EftSdk.lib")
+    foreach(EFORT_RUNTIME_DLL IN LISTS EFORT_RUNTIME_DLLS)
+        add_custom_command(TARGET run_single_point_tie POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${EFORT_RUNTIME_DLL}"
+                "$<TARGET_FILE_DIR:run_single_point_tie>"
+        )
+    endforeach()
+
+    # Read-only commissioning utility. It reports the complete current pose,
+    # configuration and joint angles without enabling motion control.
+    add_executable(read_current_pose src/read_current_pose.cpp)
+    target_include_directories(read_current_pose PRIVATE "${EFORT_SDK_ROOT}/include")
+    target_link_libraries(read_current_pose PRIVATE
+        "${EFORT_SDK_ROOT}/libs/x64/EftSdk.lib")
+    foreach(EFORT_RUNTIME_DLL IN LISTS EFORT_RUNTIME_DLLS)
+        add_custom_command(TARGET read_current_pose POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${EFORT_RUNTIME_DLL}"
+                "$<TARGET_FILE_DIR:read_current_pose>"
         )
     endforeach()
 endif()
@@ -38,5 +73,12 @@ add_executable(robot_control_tests tests/test_robot_control.cpp)
 target_link_libraries(robot_control_tests PRIVATE robot_control)
 target_compile_definitions(robot_control_tests PRIVATE
     TEST_DATA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/tie_points.json"
+    TEST_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/real_config.json"
+    TEST_PGM_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../TIE_QUEUE_SIM.pgm"
+    TEST_XPL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../TIE_QUEUE_SIM.XPL"
 )
 add_test(NAME robot_control_tests COMMAND robot_control_tests)
+
+add_executable(motion_planning_tests tests/test_motion_planning.cpp)
+target_link_libraries(motion_planning_tests PRIVATE robot_control)
+add_test(NAME motion_planning_tests COMMAND motion_planning_tests)

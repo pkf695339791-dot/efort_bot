@@ -1,0 +1,49 @@
+{
+  "controller_ip": "192.168.1.12",
+  "tool_name": "tool_tie",
+  "workobject_name": "wobj_rebar",
+  "dry_run": false,
+  "require_servo_on": true,
+  "batch_size": 25,
+  "surface": {
+    "normal": [0.0, 0.0, 1.0],
+    "x_direction": [1.0, 0.0, 0.0],
+    "tool_axis_sign": -1,
+    "tool_tilt_deg": 0.0,
+    "tool_roll_deg": 0.0,
+    "abc_convention": "ZYX_INTRINSIC"
+  },
+  "motion": {
+    "approach_distance_mm": 50.0,
+    "retreat_distance_mm": 50.0,
+    "transfer_clearance_mm": 150.0,
+    "transfer_velocity_profile": 100,
+    "local_velocity_profile": 100,
+    "zone": -1.0
+  },
+  "handshake_poll_s": 0.05,
+  "handshake_timeout_s": 120.0,
+  "execution_timeout_s": 300.0,
+  "monitor_poll_s": 0.1,
+  "workspace": {
+    "x": [-1000.0, 1000.0],
+    "y": [-1000.0, 1000.0],
+    "z": [-500.0, 1500.0],
+    "a": [-180.0, 180.0],
+    "b": [-180.0, 180.0],
+    "c": [-180.0, 180.0]
+  },
+  "rpl": {
+    "total_points_int": 0,
+    "transfer_velocity_profile_int": 1,
+    "local_velocity_profile_int": 2,
+    "error_code_int": 3,
+    "motion_type_int_start": 10,
+    "request_buffer_a_bool": 1,
+    "request_buffer_b_bool": 2,
+    "start_bool": 3,
+    "stop_bool": 4,
+    "batch_done_bool": 0,
+    "controller_error_bool": 5
+  }
+}

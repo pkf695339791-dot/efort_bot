@@ -1,5 +1,7 @@
 #pragma once
 
+#include "motion_planning.hpp"
+
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -27,13 +29,16 @@ struct WorkspaceLimits {
 
 struct RplVariableMap {
     unsigned total_points_int{0};
-    unsigned current_point_int{1};
-    unsigned error_code_int{2};
+    unsigned transfer_velocity_profile_int{1};
+    unsigned local_velocity_profile_int{2};
+    unsigned error_code_int{3};
+    unsigned motion_type_int_start{10};
     unsigned request_buffer_a_bool{1};
     unsigned request_buffer_b_bool{2};
     unsigned start_bool{3};
     unsigned stop_bool{4};
-    unsigned batch_done_bool{5};
+    unsigned batch_done_bool{0};
+    unsigned controller_error_bool{5};
 };
 
 struct RobotControlConfig {
@@ -41,53 +46,20 @@ struct RobotControlConfig {
     std::string tool_name{"tool_tie"};
     std::string workobject_name{"wobj_rebar"};
     std::size_t batch_size{25};
-    int speed{10};
-    double zone{-1.0};
     bool dry_run{true};
     bool require_servo_on{false};
     double min_confidence{0.55};
     double duplicate_distance_mm{1.0};
     double minimum_point_spacing_mm{0.5};
-    double approach_offset_z_mm{50.0};
-    double retreat_offset_z_mm{50.0};
     double tie_dwell_s{0.25};
     double handshake_poll_s{0.05};
-    double handshake_timeout_s{10.0};
+    double handshake_timeout_s{120.0};
+    double execution_timeout_s{300.0};
     double monitor_poll_s{0.1};
+    SurfaceFrameConfig surface{};
+    MotionPlanningConfig motion{};
     WorkspaceLimits workspace{};
     RplVariableMap rpl{};
-};
-
-struct CartesianPose {
-    double x{};
-    double y{};
-    double z{};
-    double a{180.0};
-    double b{};
-    double c{180.0};
-    int cfgx{};
-    int cfg1{};
-    int cfg4{};
-    int cfg6{};
-
-    CartesianPose shifted(double dz) const;
-};
-
-struct TiePoint {
-    std::string point_id;
-    CartesianPose pose;
-    double confidence{1.0};
-    std::string source{"offline"};
-};
-
-enum class QueuePointKind { Approach, Tie, Retreat };
-
-struct QueuePoint {
-    std::size_t queue_index{};
-    std::string tie_point_id;
-    QueuePointKind kind{QueuePointKind::Approach};
-    CartesianPose pose;
-    double confidence{};
 };
 
 struct SafetyIssue {
@@ -113,7 +85,7 @@ class SafetyChecker {
 public:
     explicit SafetyChecker(const RobotControlConfig& config);
     std::vector<SafetyIssue> validate_tie_points(const std::vector<TiePoint>& points) const;
-    std::vector<SafetyIssue> validate_queue(const std::vector<QueuePoint>& points) const;
+    std::vector<SafetyIssue> validate_plan(const std::vector<MotionSegment>& segments) const;
 
 private:
     const RobotControlConfig& config_;
@@ -122,17 +94,18 @@ private:
     static double distance(const CartesianPose& first, const CartesianPose& second);
 };
 
-class TiePointQueue {
+class MotionPlanBuilder {
 public:
-    explicit TiePointQueue(const RobotControlConfig& config);
-    std::vector<QueuePoint> build(const std::vector<TiePoint>& points);
-    std::vector<std::vector<QueuePoint>> batches(const std::vector<QueuePoint>& points) const;
+    explicit MotionPlanBuilder(const RobotControlConfig& config);
+    std::vector<MotionSegment> build(const std::vector<TiePoint>& points);
+    std::vector<std::vector<MotionSegment>> batches(
+        const std::vector<MotionSegment>& segments) const;
     const std::vector<std::string>& skipped() const;
 
 private:
     const RobotControlConfig& config_;
-    CoordinateManager coordinate_manager_;
     SafetyChecker safety_checker_;
+    SafeTransferPlanner planner_;
     std::vector<std::string> skipped_;
 };
 
@@ -142,11 +115,16 @@ public:
     virtual void connect() = 0;
     virtual void disconnect() noexcept = 0;
     virtual void prepare() = 0;
+    virtual std::vector<MotionSegment> prepare_targets(
+        const std::vector<MotionSegment>& segments) = 0;
     virtual void set_int(unsigned index, int value) = 0;
     virtual int get_int(unsigned index) = 0;
     virtual void set_bool(unsigned index, bool value) = 0;
     virtual bool get_bool(unsigned index) = 0;
-    virtual void set_pointc_vector(const std::vector<QueuePoint>& points) = 0;
+    virtual void set_motion_batch(
+        const std::vector<MotionSegment>& segments,
+        std::size_t target_start_index,
+        unsigned motion_type_start_index) = 0;
     virtual RobotStatus read_status() = 0;
 };
 
@@ -156,21 +134,28 @@ public:
     void connect() override;
     void disconnect() noexcept override;
     void prepare() override;
+    std::vector<MotionSegment> prepare_targets(
+        const std::vector<MotionSegment>& segments) override;
     void set_int(unsigned index, int value) override;
     int get_int(unsigned index) override;
     void set_bool(unsigned index, bool value) override;
     bool get_bool(unsigned index) override;
-    void set_pointc_vector(const std::vector<QueuePoint>& points) override;
+    void set_motion_batch(
+        const std::vector<MotionSegment>& segments,
+        std::size_t target_start_index,
+        unsigned motion_type_start_index) override;
     RobotStatus read_status() override;
 
-    const std::vector<QueuePoint>& last_vector() const;
+    const std::vector<MotionSegment>& last_vector() const;
+    std::size_t last_start_index() const;
 
 private:
     const RobotControlConfig& config_;
     bool connected_{false};
     std::unordered_map<unsigned, bool> bools_;
     std::unordered_map<unsigned, int> ints_;
-    std::vector<QueuePoint> last_vector_;
+    std::vector<MotionSegment> last_vector_;
+    std::size_t last_start_index_{};
     void ensure_connected() const;
 };
 
@@ -180,11 +165,16 @@ public:
     void connect() override;
     void disconnect() noexcept override;
     void prepare() override;
+    std::vector<MotionSegment> prepare_targets(
+        const std::vector<MotionSegment>& segments) override;
     void set_int(unsigned index, int value) override;
     int get_int(unsigned index) override;
     void set_bool(unsigned index, bool value) override;
     bool get_bool(unsigned index) override;
-    void set_pointc_vector(const std::vector<QueuePoint>& points) override;
+    void set_motion_batch(
+        const std::vector<MotionSegment>& segments,
+        std::size_t target_start_index,
+        unsigned motion_type_start_index) override;
     RobotStatus read_status() override;
 
 private:
@@ -198,14 +188,19 @@ std::unique_ptr<RobotBackend> create_backend(const RobotControlConfig& config);
 class RplBatchSender {
 public:
     RplBatchSender(const RobotControlConfig& config, RobotBackend& backend);
-    void send_queue(const std::vector<QueuePoint>& points);
+    void send_queue(const std::vector<MotionSegment>& segments);
     void request_stop();
 
 private:
     const RobotControlConfig& config_;
     RobotBackend& backend_;
-    void send_batch(const std::vector<QueuePoint>& batch, std::size_t batch_index);
+    void send_batch(
+        const std::vector<MotionSegment>& batch,
+        std::size_t batch_index,
+        std::size_t buffer_start);
     void wait_for_request(unsigned bool_index);
+    void wait_for_completion();
+    void throw_if_controller_error();
 };
 
 class ExecutionMonitor {
@@ -222,7 +217,7 @@ private:
 class TieToolInterface {
 public:
     explicit TieToolInterface(const RobotControlConfig& config);
-    void tie(const QueuePoint& point) const;
+    void tie(const MotionSegment& segment) const;
 
 private:
     const RobotControlConfig& config_;
@@ -232,18 +227,16 @@ class RobotControlSystem {
 public:
     explicit RobotControlSystem(
         RobotControlConfig config, std::unique_ptr<RobotBackend> backend = nullptr);
-    std::vector<QueuePoint> run(const std::vector<TiePoint>& points);
+    std::vector<MotionSegment> run(const std::vector<TiePoint>& points);
     const std::vector<std::string>& skipped() const;
 
 private:
     RobotControlConfig config_;
     std::unique_ptr<RobotBackend> backend_;
-    TiePointQueue queue_builder_;
+    MotionPlanBuilder plan_builder_;
 };
 
 std::vector<TiePoint> load_tie_points_json(const std::string& path);
 RobotControlConfig load_config_json(const std::string& path);
-std::string queue_point_kind_name(QueuePointKind kind);
 
 }  // namespace tie
-
