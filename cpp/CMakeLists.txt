@@ -34,6 +34,35 @@ if(EFORT_WITH_SDK)
                 "$<TARGET_FILE_DIR:robot_control>"
         )
     endforeach()
+
+    # A small, direct SDK program for commissioning one taught Cartesian tie point.
+    # It deliberately bypasses the queued XPL program so the tie-tool DO can be
+    # switched exactly after the TCP reaches the target.
+    add_executable(run_single_point_tie src/single_point_tie.cpp)
+    target_include_directories(run_single_point_tie PRIVATE "${EFORT_SDK_ROOT}/include")
+    target_link_libraries(run_single_point_tie PRIVATE
+        "${EFORT_SDK_ROOT}/libs/x64/EftSdk.lib")
+    foreach(EFORT_RUNTIME_DLL IN LISTS EFORT_RUNTIME_DLLS)
+        add_custom_command(TARGET run_single_point_tie POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${EFORT_RUNTIME_DLL}"
+                "$<TARGET_FILE_DIR:run_single_point_tie>"
+        )
+    endforeach()
+
+    # Read-only commissioning utility. It reports the complete current pose,
+    # configuration and joint angles without enabling motion control.
+    add_executable(read_current_pose src/read_current_pose.cpp)
+    target_include_directories(read_current_pose PRIVATE "${EFORT_SDK_ROOT}/include")
+    target_link_libraries(read_current_pose PRIVATE
+        "${EFORT_SDK_ROOT}/libs/x64/EftSdk.lib")
+    foreach(EFORT_RUNTIME_DLL IN LISTS EFORT_RUNTIME_DLLS)
+        add_custom_command(TARGET read_current_pose POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${EFORT_RUNTIME_DLL}"
+                "$<TARGET_FILE_DIR:read_current_pose>"
+        )
+    endforeach()
 endif()
 
 add_executable(run_tie_queue src/main.cpp)
